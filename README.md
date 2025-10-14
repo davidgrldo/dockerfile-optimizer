@@ -17,7 +17,7 @@ A powerful CLI tool that **analyzes Dockerfiles** for optimization and best prac
 ## 📦 Installation
 
 ```bash
-git clone https://github.com/yourusername/dockerfile-optimizer.git
+git clone https://github.com/davidgrldo/dockerfile-optimizer.git
 cd dockerfile-optimizer
 go build -o dockopt ./cmd/dockopt
 ```
