@@ -24,8 +24,9 @@ var rules = []Rule{
 		},
 	},
 	{
-		Description: "Use slim Java images",
+		Description: "Use slim Java images for smaller and faster containers",
 		Stack:       "java",
+		Severity:    "info",
 		Check: func(lines []string) string {
 			for _, l := range lines {
 				if l == "FROM openjdk:17" {
@@ -38,6 +39,7 @@ var rules = []Rule{
 	{
 		Description: "Use multi-stage builds for Go to reduce image size",
 		Stack:       "go",
+		Severity:    "warn",
 		Check: func(lines []string) string {
 			stageCount := 0
 			for _, l := range lines {
@@ -54,22 +56,19 @@ var rules = []Rule{
 	{
 		Description: "Ensure CGO is disabled when building static Go binaries",
 		Stack:       "go",
+		Severity:    "error",
 		Check: func(lines []string) string {
 			var runBuffer string
-
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "RUN") {
 					runBuffer += " " + line
 					if !strings.HasSuffix(line, "\\") {
-						// End of RUN command, evaluate
 						lower := strings.ToLower(runBuffer)
-						if strings.Contains(lower, "go build") {
-							if !strings.Contains(lower, "cgo_enabled=0") {
-								return "Set CGO_ENABLED=0 when building static Go binaries (e.g., for Alpine or scratch)"
-							}
+						if strings.Contains(lower, "go build") && !strings.Contains(lower, "cgo_enabled=0") {
+							return "Set CGO_ENABLED=0 when building static Go binaries (e.g., for Alpine or scratch)"
 						}
-						runBuffer = "" // reset for next RUN
+						runBuffer = ""
 					}
 				}
 			}
@@ -79,6 +78,7 @@ var rules = []Rule{
 	{
 		Description: "Avoid shipping full Golang build image as final container",
 		Stack:       "go",
+		Severity:    "warn",
 		Check: func(lines []string) string {
 			fromCount := 0
 			for _, l := range lines {
@@ -95,6 +95,7 @@ var rules = []Rule{
 	{
 		Description: "Consider using multi-stage builds for Rust to separate build and runtime",
 		Stack:       "rust",
+		Severity:    "warn",
 		Check: func(lines []string) string {
 			stageCount := 0
 			for _, l := range lines {
@@ -111,6 +112,7 @@ var rules = []Rule{
 	{
 		Description: "Use specific SDK/runtime tags (not 'latest') in .NET base images",
 		Stack:       "dotnet",
+		Severity:    "warn",
 		Check: func(lines []string) string {
 			for _, l := range lines {
 				if strings.Contains(l, "mcr.microsoft.com/dotnet") && strings.Contains(l, ":latest") {
@@ -123,6 +125,7 @@ var rules = []Rule{
 	{
 		Description: "Install PHP dependencies using composer with --no-dev and --optimize-autoloader flags",
 		Stack:       "php",
+		Severity:    "warn",
 		Check: func(lines []string) string {
 			for _, l := range lines {
 				if strings.Contains(l, "composer install") && !strings.Contains(l, "--no-dev") {
@@ -135,6 +138,7 @@ var rules = []Rule{
 	{
 		Description: "Use '--deployment' flag with 'bundle install' for production",
 		Stack:       "ruby",
+		Severity:    "info",
 		Check: func(lines []string) string {
 			for _, l := range lines {
 				if strings.Contains(l, "bundle install") && !strings.Contains(l, "--deployment") {

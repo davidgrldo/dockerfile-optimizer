@@ -3,9 +3,13 @@ package report
 import (
 	`encoding/json`
 	`fmt`
+	`io`
+	`os`
 
 	`github.com/davidgrldo/dockerfile-optimizer/internal/analyzer`
 )
+
+var out io.Writer = os.Stdout
 
 func PrintJSON(results []analyzer.Suggestion, stack string) {
 	output := map[string]interface{}{
@@ -15,20 +19,20 @@ func PrintJSON(results []analyzer.Suggestion, stack string) {
 
 	data, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
-		fmt.Println("Failed to format JSON:", err)
+		_, _ = fmt.Fprintln(out, "Failed to format JSON:", err)
 		return
 	}
-	fmt.Println(string(data))
+	_, _ = fmt.Fprintln(out, string(data))
 }
 
 func PrintHuman(results []analyzer.Suggestion) {
 	if len(results) == 0 {
-		fmt.Println("✅ No issues found!")
+		_, _ = fmt.Fprintln(out, "✅ No issues found!")
 		return
 	}
 
-	fmt.Println("🚨 Optimization Suggestions:")
+	_, _ = fmt.Fprintln(out, "🚨 Optimization Suggestions:")
 	for _, r := range results {
-		fmt.Printf(" - [%s] %s\n", r.Severity, r.Description)
+		_, _ = fmt.Fprintf(out, " - [%s] %s\n", r.Severity, r.Description)
 	}
 }
