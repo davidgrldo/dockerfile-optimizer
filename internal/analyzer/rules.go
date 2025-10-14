@@ -5,17 +5,19 @@ import `strings`
 type Rule struct {
 	Description string
 	Stack       string
+	Severity    string // "info", "warn", "error"
 	Check       func([]string) string
 }
 
 var rules = []Rule{
 	{
-		Description: "Avoid using latest tag",
+		Description: "Avoid using 'latest' tag in base images",
 		Stack:       "generic",
+		Severity:    "warn",
 		Check: func(lines []string) string {
 			for _, l := range lines {
-				if l == "FROM ubuntu:latest" {
-					return "Avoid using 'latest' tag for base images"
+				if strings.Contains(l, "FROM") && strings.Contains(l, ":latest") {
+					return "Avoid using 'latest' tag in base images"
 				}
 			}
 			return ""

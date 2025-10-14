@@ -1,0 +1,23 @@
+name: Lint Dockerfile
+
+on:
+  push:
+    paths:
+      - '**/Dockerfile'
+  pull_request:
+
+jobs:
+  dockerfile-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Build dockopt
+        run: go build -o dockopt ./cmd/dockopt
+
+      - name: Run Dockerfile Optimizer
+        run: ./dockopt ./Dockerfile --json

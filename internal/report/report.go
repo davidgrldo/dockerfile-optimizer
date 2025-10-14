@@ -1,14 +1,34 @@
 package report
 
-import "fmt"
+import (
+	`encoding/json`
+	`fmt`
 
-func Print(findings []string) {
-	if len(findings) == 0 {
+	`github.com/davidgrldo/dockerfile-optimizer/internal/analyzer`
+)
+
+func PrintJSON(results []analyzer.Suggestion, stack string) {
+	output := map[string]interface{}{
+		"stack":       stack,
+		"suggestions": results,
+	}
+
+	data, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		fmt.Println("Failed to format JSON:", err)
+		return
+	}
+	fmt.Println(string(data))
+}
+
+func PrintHuman(results []analyzer.Suggestion) {
+	if len(results) == 0 {
 		fmt.Println("✅ No issues found!")
 		return
 	}
+
 	fmt.Println("🚨 Optimization Suggestions:")
-	for _, f := range findings {
-		fmt.Printf(" - %s\n", f)
+	for _, r := range results {
+		fmt.Printf(" - [%s] %s\n", r.Severity, r.Description)
 	}
 }
