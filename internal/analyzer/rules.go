@@ -132,7 +132,7 @@ func checkComposerFlag(flag, message string) ruleCheck {
 		var findings []Finding
 		for _, stage := range doc.Stages {
 			for _, instruction := range stage.Instructions {
-				if instruction.Opcode == "RUN" && strings.Contains(strings.ToLower(instruction.Value), "composer install") && !hasToken(instruction.Value, flag) {
+				if instruction.Opcode == "RUN" && containsCommandSequence(instruction.Value, "composer install") && !hasToken(instruction.Value, flag) {
 					findings = append(findings, finding(message, instruction, stage.Index))
 				}
 			}

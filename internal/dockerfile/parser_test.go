@@ -90,6 +90,17 @@ func TestParseContinuationRange(t *testing.T) {
 	}
 }
 
+func TestParseRejectsTrailingContinuationAtEOF(t *testing.T) {
+	_, err := Parse("Dockerfile", strings.NewReader("FROM alpine\nRUN echo unfinished \\\n"))
+	var parseErr *ParseError
+	if !errors.As(err, &parseErr) {
+		t.Fatalf("error=%#v, want *ParseError", err)
+	}
+	if parseErr.Line != 2 {
+		t.Fatalf("line=%d, want 2", parseErr.Line)
+	}
+}
+
 func TestParseCustomEscapeAndJSON(t *testing.T) {
 	input := "# escape=`\nFROM windows/servercore:ltsc2022`\n AS runtime\nCMD [\"cmd\", \"/C\", \"echo ok\"]\n"
 	doc, err := Parse("Dockerfile", strings.NewReader(input))

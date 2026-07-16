@@ -61,17 +61,26 @@ func TestNewOutputMapsResultAndCountsSeverities(t *testing.T) {
 
 func TestWriteJSONUsesExplicitLowercaseFieldNames(t *testing.T) {
 	var buffer bytes.Buffer
-	if err := WriteJSON(&buffer, analyzer.Result{}); err != nil {
+	if err := WriteJSON(&buffer, analyzer.Result{
+		Findings: []analyzer.Finding{{
+			ID:       "GEN001",
+			Severity: analyzer.SeverityWarn,
+			Message:  "warning",
+			Range:    dockerfile.Range{StartLine: 1, EndLine: 1},
+		}},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(buffer.Bytes(), &fields); err != nil {
-		t.Fatal(err)
+	root := assertJSONKeys(t, buffer.Bytes(), "schema_version", "source", "stack", "findings", "summary")
+	assertJSONKeys(t, root["stack"], "detected", "selected", "supported")
+	assertJSONKeys(t, root["summary"], "info", "warn", "error")
+	var findings []json.RawMessage
+	if err := json.Unmarshal(root["findings"], &findings); err != nil || len(findings) != 1 {
+		t.Fatalf("findings=%s, error=%v", root["findings"], err)
 	}
-	for _, name := range []string{"schema_version", "source", "stack", "findings", "summary"} {
-		if _, ok := fields[name]; !ok {
-			t.Fatalf("missing JSON field %q in %s", name, buffer.String())
-		}
+	assertJSONKeys(t, findings[0], "id", "severity", "message", "line", "end_line", "stage")
+	if !bytes.Contains(buffer.Bytes(), []byte(`"stage":null`)) {
+		t.Fatalf("missing explicit null stage in %s", buffer.String())
 	}
 }
 
@@ -147,6 +156,40 @@ func TestWriteErrorJSONV1(t *testing.T) {
 	if output.SchemaVersion != "1" || output.Error.Kind != "parse_error" || output.Error.Message != "Dockerfile:4: invalid FROM" {
 		t.Fatalf("output=%#v", output)
 	}
+	root := assertJSONKeys(t, buffer.Bytes(), "schema_version", "error")
+	assertJSONKeys(t, root["error"], "kind", "message")
+}
+
+func TestWriteHumanGenericAnalysisDoesNotClaimStackSpecificCleanliness(t *testing.T) {
+	doc, err := dockerfile.Parse("Dockerfile", strings.NewReader("FROM alpine:3.20\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buffer bytes.Buffer
+	if err := WriteHuman(&buffer, analyzer.Analyze(doc, analyzer.StackGeneric)); err != nil {
+		t.Fatal(err)
+	}
+	got := buffer.String()
+	if !strings.Contains(got, "generic checks only") || strings.Contains(got, "Stack-specific checks enabled") || strings.Contains(got, "No issues found") {
+		t.Fatalf("output=%q", got)
+	}
+}
+
+func assertJSONKeys(t *testing.T, raw []byte, want ...string) map[string]json.RawMessage {
+	t.Helper()
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		t.Fatalf("decode object %s: %v", raw, err)
+	}
+	if len(object) != len(want) {
+		t.Fatalf("keys in %s=%v, want exactly %v", raw, object, want)
+	}
+	for _, key := range want {
+		if _, ok := object[key]; !ok {
+			t.Fatalf("missing key %q in %s", key, raw)
+		}
+	}
+	return object
 }
 
 type errorWriter struct{ err error }

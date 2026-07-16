@@ -5,12 +5,14 @@ on:
     paths:
       - "**/*.go"
       - go.mod
+      - go.sum
       - ".github/workflows/**"
       - "testdata/dockerfiles/**"
   pull_request:
     paths:
       - "**/*.go"
       - go.mod
+      - go.sum
       - ".github/workflows/**"
       - "testdata/dockerfiles/**"
 

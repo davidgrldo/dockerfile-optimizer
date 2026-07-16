@@ -26,6 +26,8 @@ func TestProductionRuleRegistry(t *testing.T) {
 		{"spaced CGO assignment", "FROM golang AS build\nRUN CGO_ENABLED = 0 go build\nFROM scratch\n", StackGo, nil, []string{"GO002"}},
 		{"unrelated Golang substring", "FROM alpine AS build\nFROM acme/notgolang-runtime\n", StackGo, nil, []string{"GO003"}},
 		{"PHP flags independent", "FROM php:8.4\nRUN composer install --no-dev\n", StackPHP, []string{"PHP002"}, []string{"PHP001"}},
+		{"PHP spaced command", "FROM php:8.4\nRUN composer   install\n", StackPHP, []string{"PHP001", "PHP002"}, nil},
+		{"PHP prefixed command ignored", "FROM php:8.4\nRUN notcomposer install\n", StackPHP, nil, []string{"PHP001", "PHP002"}},
 		{"Go single stage", "FROM alpine:3.20\n", StackGo, []string{"GO001"}, nil},
 		{"Java full runtime", "FROM openjdk:17\n", StackJava, []string{"JAVA001"}, nil},
 		{"Java slim runtime", "FROM openjdk:17-slim\n", StackJava, nil, []string{"JAVA001"}},
@@ -60,6 +62,59 @@ func TestProductionRuleRegistry(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGoFindingRangesAndStages(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		id    string
+		start int
+		end   int
+		stage int
+	}{
+		{
+			name:  "GO002 logical RUN range",
+			input: "FROM golang AS build\nRUN echo prep \\\n && go build -o /app\nFROM scratch\n",
+			id:    "GO002",
+			start: 2,
+			end:   3,
+			stage: 0,
+		},
+		{
+			name:  "GO003 actual final FROM",
+			input: "FROM golang AS build\nRUN CGO_ENABLED=0 go build\nFROM alpine AS prep\nRUN true\nFROM golang\n",
+			id:    "GO003",
+			start: 5,
+			end:   5,
+			stage: 2,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := Analyze(parseTestDocument(t, test.input), StackGo)
+			for _, finding := range result.Findings {
+				if finding.ID != test.id {
+					continue
+				}
+				if finding.Range.StartLine != test.start || finding.Range.EndLine != test.end || finding.Stage == nil || *finding.Stage != test.stage {
+					t.Fatalf("finding=%#v, want lines %d-%d stage %d", finding, test.start, test.end, test.stage)
+				}
+				return
+			}
+			t.Fatalf("finding %s absent; got %#v", test.id, result.Findings)
+		})
+	}
+}
+
+func TestAnalyzeGenericRunsOnlyGenericRulesAndIsUnsupported(t *testing.T) {
+	result := Analyze(parseTestDocument(t, "FROM alpine:latest\n"), StackGeneric)
+	if result.Supported {
+		t.Fatal("generic analysis must not claim stack-specific support")
+	}
+	if len(result.Findings) != 1 || result.Findings[0].ID != "GEN001" {
+		t.Fatalf("findings=%#v, want only GEN001", result.Findings)
 	}
 }
 

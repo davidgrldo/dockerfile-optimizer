@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,6 +75,20 @@ func TestRunMalformedJSONError(t *testing.T) {
 	}
 }
 
+func TestRunTrailingContinuationJSONParseError(t *testing.T) {
+	stdout, stderr, code := runWithBuffers("--json", fixturePath("unterminated-continuation"))
+	if code != 2 || stderr != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var output report.ErrorOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output %q: %v", stdout, err)
+	}
+	if output.Error.Kind != "parse_error" || !strings.Contains(output.Error.Message, ":2:") {
+		t.Fatalf("output=%#v", output)
+	}
+}
+
 func TestRunMissingFile(t *testing.T) {
 	_, stderr, code := runWithBuffers("missing.Dockerfile")
 	if code != 2 || !strings.Contains(stderr, "input_error") {
@@ -109,6 +124,24 @@ func TestRunFlagParseErrorUsesRequestedJSON(t *testing.T) {
 	}
 }
 
+func TestRunJSONIntentAliasesRouteFlagErrorsToJSON(t *testing.T) {
+	for _, alias := range []string{"-json", "--json=1", "--json=TRUE"} {
+		t.Run(alias, func(t *testing.T) {
+			stdout, stderr, code := runWithBuffers(alias, "--stack")
+			if code != 2 || stderr != "" {
+				t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+			}
+			var output report.ErrorOutput
+			if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+				t.Fatalf("decode output %q: %v", stdout, err)
+			}
+			if output.Error.Kind != "usage_error" {
+				t.Fatalf("output=%#v", output)
+			}
+		})
+	}
+}
+
 func TestRunUnknownFlagBeforeJSONUsesJSONError(t *testing.T) {
 	stdout, stderr, code := runWithBuffers("--bogus", "--json", fixturePath("clean"))
 	if code != 2 || stderr != "" {
@@ -131,6 +164,9 @@ func TestRequestsJSONStopsAtPathOrFlagTerminator(t *testing.T) {
 	}{
 		{name: "flag", args: []string{"--json"}, want: true},
 		{name: "explicit true", args: []string{"--json=true"}, want: true},
+		{name: "single dash", args: []string{"-json"}, want: true},
+		{name: "numeric true", args: []string{"--json=1"}, want: true},
+		{name: "uppercase true", args: []string{"--json=TRUE"}, want: true},
 		{name: "explicit false", args: []string{"--json=false"}, want: false},
 		{name: "after path", args: []string{"Dockerfile", "--json"}, want: false},
 		{name: "after terminator", args: []string{"--", "--json"}, want: false},
@@ -163,6 +199,43 @@ func TestRunOutputError(t *testing.T) {
 	code := run([]string{fixturePath("clean")}, failingWriter{errors.New("broken pipe")}, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "broken pipe") {
 		t.Fatalf("code=%d, stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRunCloseErrorUsesJSONInputErrorBeforeReporting(t *testing.T) {
+	reader := &closeErrorReader{Reader: strings.NewReader("FROM alpine:3.20\n"), err: errors.New("close failed")}
+	var stdout, stderr bytes.Buffer
+	code := runWithOpener([]string{"--json", "Dockerfile"}, &stdout, &stderr, func(string) (io.ReadCloser, error) {
+		return reader, nil
+	})
+	if code != 2 || stderr.String() != "" || !reader.closed {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q, closed=%v", code, stdout.String(), stderr.String(), reader.closed)
+	}
+	var output report.ErrorOutput
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("decode output %q: %v", stdout.String(), err)
+	}
+	if output.Error.Kind != "input_error" || !strings.Contains(output.Error.Message, "close failed") {
+		t.Fatalf("output=%#v", output)
+	}
+}
+
+func TestRunGenericAnalysisNeverClaimsStackSpecificChecks(t *testing.T) {
+	stdout, stderr, code := runWithBuffers(fixturePath("generic"))
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "generic checks only") || strings.Contains(stdout, "Stack-specific checks enabled") || strings.Contains(stdout, "No issues found") {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+
+	stdout, stderr, code = runWithBuffers("--json", fixturePath("generic"))
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var output report.Output
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Stack.Selected != analyzer.StackGeneric || output.Stack.Supported {
+		t.Fatalf("stack=%#v", output.Stack)
 	}
 }
 
@@ -205,3 +278,14 @@ func runWithBuffers(args ...string) (string, string, int) {
 type failingWriter struct{ err error }
 
 func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+type closeErrorReader struct {
+	io.Reader
+	err    error
+	closed bool
+}
+
+func (r *closeErrorReader) Close() error {
+	r.closed = true
+	return r.err
+}

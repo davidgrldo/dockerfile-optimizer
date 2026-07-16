@@ -80,9 +80,7 @@ func Parse(name string, r io.Reader) (*Document, error) {
 		}
 	}
 	if continued {
-		if _, err := parseAndAdd(doc, logical, start, end, lines, len(lines)); err != nil {
-			return nil, err
-		}
+		return nil, &ParseError{Source: name, Line: start, Message: "unterminated line continuation"}
 	}
 	return doc, nil
 }

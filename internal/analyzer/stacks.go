@@ -23,22 +23,22 @@ const (
 )
 
 type stackDefinition struct {
-	stack     Stack
-	keywords  []string
-	supported bool
+	stack             Stack
+	imageRepositories []string
+	commandSequences  []string
 }
 
 var stackRegistry = []stackDefinition{
-	{stack: StackGeneric, supported: true},
-	{stack: StackGo, keywords: []string{"golang", "go build"}, supported: true},
-	{stack: StackJava, keywords: []string{"openjdk", "java", "maven", "gradle"}, supported: true},
-	{stack: StackPython, keywords: []string{"python", "pip install"}},
-	{stack: StackNode, keywords: []string{"npm install", "node", "yarn"}},
-	{stack: StackRust, keywords: []string{"rust", "cargo"}, supported: true},
-	{stack: StackDotNet, keywords: []string{"dotnet", "csproj"}, supported: true},
-	{stack: StackPHP, keywords: []string{"php", "composer"}, supported: true},
-	{stack: StackRuby, keywords: []string{"ruby", "bundle install"}, supported: true},
-	{stack: StackCCPP, keywords: []string{"gcc", "g++", "make", "cmake"}},
+	{stack: StackGeneric},
+	{stack: StackGo, imageRepositories: []string{"golang"}, commandSequences: []string{"go build"}},
+	{stack: StackJava, imageRepositories: []string{"openjdk", "java", "maven", "gradle"}, commandSequences: []string{"java", "maven", "gradle"}},
+	{stack: StackPython, imageRepositories: []string{"python"}, commandSequences: []string{"pip install"}},
+	{stack: StackNode, imageRepositories: []string{"node"}, commandSequences: []string{"npm install", "yarn"}},
+	{stack: StackRust, imageRepositories: []string{"rust"}, commandSequences: []string{"rustc", "cargo"}},
+	{stack: StackDotNet, imageRepositories: []string{"dotnet"}, commandSequences: []string{"dotnet", "csproj"}},
+	{stack: StackPHP, imageRepositories: []string{"php"}, commandSequences: []string{"composer"}},
+	{stack: StackRuby, imageRepositories: []string{"ruby"}, commandSequences: []string{"bundle install"}},
+	{stack: StackCCPP, imageRepositories: []string{"gcc", "g++"}, commandSequences: []string{"gcc", "g++", "make", "cmake"}},
 }
 
 func ParseStack(value string) (Stack, error) {
@@ -50,13 +50,13 @@ func ParseStack(value string) (Stack, error) {
 }
 
 func IsSupported(stack Stack) bool {
-	definition, ok := lookupStack(stack)
-	return ok && definition.supported
+	_, valid := lookupStack(stack)
+	return valid && stack != StackGeneric && len(stackRuleIDs(stack)) > 0
 }
 
 func DetectStack(doc *dockerfile.Document) Stack {
 	for _, stage := range doc.Stages {
-		if stack, ok := detectStack(stage.BaseImage); ok {
+		if stack, ok := detectStackFromImage(stage.BaseImage); ok {
 			return stack
 		}
 	}
@@ -64,17 +64,29 @@ func DetectStack(doc *dockerfile.Document) Stack {
 		if instruction.Opcode != "RUN" {
 			continue
 		}
-		if stack, ok := detectStack(instruction.Value); ok {
+		if stack, ok := detectStackFromCommand(instruction.Value); ok {
 			return stack
 		}
 	}
 	return StackGeneric
 }
 
-func detectStack(value string) (Stack, bool) {
+func detectStackFromImage(value string) (Stack, bool) {
+	components := imageRepositoryComponents(value)
 	for _, definition := range stackRegistry[1:] {
-		if containsKeyword(value, definition.keywords) {
+		if containsAny(components, definition.imageRepositories) {
 			return definition.stack, true
+		}
+	}
+	return "", false
+}
+
+func detectStackFromCommand(value string) (Stack, bool) {
+	for _, definition := range stackRegistry[1:] {
+		for _, sequence := range definition.commandSequences {
+			if containsCommandSequence(value, sequence) {
+				return definition.stack, true
+			}
 		}
 	}
 	return "", false
@@ -89,10 +101,53 @@ func lookupStack(stack Stack) (stackDefinition, bool) {
 	return stackDefinition{}, false
 }
 
-func containsKeyword(value string, keywords []string) bool {
-	value = strings.ToLower(value)
-	for _, keyword := range keywords {
-		if strings.Contains(value, keyword) {
+func stackRuleIDs(stack Stack) []string {
+	ids := []string{}
+	for _, rule := range Rules() {
+		for _, assigned := range rule.Stacks() {
+			if assigned == stack {
+				ids = append(ids, rule.ID())
+				break
+			}
+		}
+	}
+	return ids
+}
+
+func imageRepositoryComponents(image string) []string {
+	name, _, _ := strings.Cut(strings.ToLower(image), "@")
+	components := strings.Split(name, "/")
+	last := len(components) - 1
+	if last >= 0 {
+		components[last], _, _ = strings.Cut(components[last], ":")
+	}
+	return components
+}
+
+func containsAny(values, candidates []string) bool {
+	for _, value := range values {
+		for _, candidate := range candidates {
+			if value == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsCommandSequence(value, sequence string) bool {
+	fields := strings.Fields(strings.ToLower(value))
+	want := strings.Fields(sequence)
+	for start := 0; start+len(want) <= len(fields); start++ {
+		matched := true
+		for offset := range want {
+			token := strings.Trim(fields[start+offset], ";&|(){}'\"")
+			if token != want[offset] {
+				matched = false
+				break
+			}
+		}
+		if matched {
 			return true
 		}
 	}

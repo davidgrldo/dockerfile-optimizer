@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/davidgrldo/dockerfile-optimizer/internal/analyzer"
@@ -14,6 +15,12 @@ import (
 )
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithOpener(args, stdout, stderr, func(path string) (io.ReadCloser, error) {
+		return os.Open(path)
+	})
+}
+
+func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (io.ReadCloser, error)) int {
 	jsonRequested := requestsJSON(args)
 	flags := flag.NewFlagSet("dockopt", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -40,13 +47,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	path := flags.Arg(0)
-	file, err := os.Open(path)
+	file, err := open(path)
 	if err != nil {
 		return writeFailure(stdout, stderr, *jsonMode, "input_error", err)
 	}
-	defer file.Close()
 
 	doc, err := dockerfile.Parse(path, file)
+	closeErr := file.Close()
 	if err != nil {
 		kind := "input_error"
 		var parseErr *dockerfile.ParseError
@@ -54,6 +61,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 			kind = "parse_error"
 		}
 		return writeFailure(stdout, stderr, *jsonMode, kind, err)
+	}
+	if closeErr != nil {
+		return writeFailure(stdout, stderr, *jsonMode, "input_error", fmt.Errorf("close %s: %w", path, closeErr))
 	}
 	selected := analyzer.DetectStack(doc)
 	if *stackName != "" {
@@ -83,12 +93,22 @@ func requestsJSON(args []string) bool {
 		if arg == "--" || !strings.HasPrefix(arg, "-") {
 			break
 		}
-		switch arg {
-		case "--json", "--json=true":
-			jsonMode = true
-		case "--json=false":
-			jsonMode = false
-		case "--stack", "--fail-on":
+		flagText := strings.TrimPrefix(arg, "-")
+		flagText = strings.TrimPrefix(flagText, "-")
+		name, value, hasValue := strings.Cut(flagText, "=")
+		switch name {
+		case "json":
+			if !hasValue {
+				jsonMode = true
+				continue
+			}
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				jsonMode = parsed
+			}
+		case "stack", "fail-on":
+			if hasValue {
+				continue
+			}
 			index++
 		}
 	}

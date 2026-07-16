@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -23,6 +24,8 @@ func TestDetectStackUsesParsedSyntax(t *testing.T) {
 	}{
 		{"# Rust is not used\nFROM alpine\n", StackGeneric},
 		{"FROM golang:1.24\nRUN go build ./...\n", StackGo},
+		{"FROM acme/notgolang-runtime\n", StackGeneric},
+		{"FROM alpine\nRUN go   build ./...\n", StackGo},
 		{"FROM python:3.12-slim\n", StackPython},
 	}
 	for _, test := range tests {
@@ -65,7 +68,41 @@ func TestStackValidationAndSupport(t *testing.T) {
 	if _, err := ParseStack("golnag"); err == nil {
 		t.Fatal("expected invalid stack")
 	}
-	if IsSupported(StackPython) || !IsSupported(StackGo) {
-		t.Fatal("support registry mismatch")
+	want := map[Stack]bool{
+		StackGeneric: false,
+		StackGo:      true,
+		StackJava:    true,
+		StackPython:  false,
+		StackNode:    false,
+		StackRust:    true,
+		StackDotNet:  true,
+		StackPHP:     true,
+		StackRuby:    true,
+		StackCCPP:    false,
+	}
+	for stack, supported := range want {
+		if got := IsSupported(stack); got != supported {
+			t.Errorf("IsSupported(%q)=%v, want %v", stack, got, supported)
+		}
+	}
+}
+
+func TestStackRuleIDsComeFromRegisteredRules(t *testing.T) {
+	want := map[Stack][]string{
+		StackGeneric: {"GEN001"},
+		StackGo:      {"GO001", "GO002", "GO003"},
+		StackJava:    {"JAVA001"},
+		StackPython:  {},
+		StackNode:    {},
+		StackRust:    {"RUST001"},
+		StackDotNet:  {"DOTNET001"},
+		StackPHP:     {"PHP001", "PHP002"},
+		StackRuby:    {"RUBY001"},
+		StackCCPP:    {},
+	}
+	for stack, ids := range want {
+		if got := stackRuleIDs(stack); !reflect.DeepEqual(got, ids) {
+			t.Errorf("stackRuleIDs(%q)=%v, want %v", stack, got, ids)
+		}
 	}
 }
