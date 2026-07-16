@@ -3,7 +3,6 @@ package main
 import (
 	flag "github.com/spf13/pflag"
 
-	"fmt"
 	"log"
 	"os"
 
@@ -58,18 +57,13 @@ func main() {
 		stack = analyzer.DetectStack(doc)
 	}
 	result := analyzer.Analyze(doc, stack)
-	results := make([]analyzer.Suggestion, 0, len(result.Findings))
-	for _, finding := range result.Findings {
-		results = append(results, analyzer.Suggestion{
-			Description: finding.Message,
-			Severity:    string(finding.Severity),
-		})
-	}
-
+	var writeErr error
 	if *jsonOutput {
-		report.PrintJSON(results, string(stack))
+		writeErr = report.WriteJSON(os.Stdout, result)
 	} else {
-		fmt.Printf("🔍 Detected stack: %s\n", stack)
-		report.PrintHuman(results)
+		writeErr = report.WriteHuman(os.Stdout, result)
+	}
+	if writeErr != nil {
+		log.Fatalf("Failed to write output: %v", writeErr)
 	}
 }

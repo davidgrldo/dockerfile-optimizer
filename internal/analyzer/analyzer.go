@@ -62,9 +62,3 @@ func appliesTo(rule Rule, selected Stack) bool {
 	}
 	return false
 }
-
-// Suggestion temporarily adapts typed findings to the legacy reporters.
-type Suggestion struct {
-	Description string
-	Severity    string
-}
