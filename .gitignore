@@ -1,1 +1,4 @@
 .worktrees/
+.vibe-scan/
+dockopt
+coverage.out

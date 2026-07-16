@@ -1,23 +1,49 @@
-name: Lint Dockerfile
+name: Verify
 
 on:
   push:
     paths:
-      - '**/Dockerfile'
+      - "**/*.go"
+      - go.mod
+      - ".github/workflows/**"
+      - "testdata/dockerfiles/**"
   pull_request:
+    paths:
+      - "**/*.go"
+      - go.mod
+      - ".github/workflows/**"
+      - "testdata/dockerfiles/**"
+
+permissions:
+  contents: read
 
 jobs:
-  dockerfile-lint:
+  verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go build -o dockopt ./cmd/dockopt
+      - name: Verify fixture exit contracts
+        shell: bash
+        run: |
+          clean_json="$(./dockopt --json testdata/dockerfiles/clean.Dockerfile)"
+          printf '%s\n' "$clean_json"
+          grep -Fq '"findings":[]' <<<"$clean_json"
+          ./dockopt --json testdata/dockerfiles/unsupported-python.Dockerfile
 
-      - name: Build dockopt
-        run: go build -o dockopt ./cmd/dockopt
+          set +e
+          ./dockopt --json testdata/dockerfiles/error-go-static.Dockerfile >/tmp/error.json
+          error_status=$?
+          ./dockopt --json testdata/dockerfiles/malformed.Dockerfile >/tmp/parse.json
+          parse_status=$?
+          set -e
 
-      - name: Run Dockerfile Optimizer
-        run: ./dockopt ./Dockerfile --json
+          test "$error_status" = "1"
+          test "$parse_status" = "2"
