@@ -3,12 +3,12 @@ package main
 import (
 	flag "github.com/spf13/pflag"
 
-	`fmt`
+	"fmt"
 	"log"
-	`os`
+	"os"
 
 	"github.com/davidgrldo/dockerfile-optimizer/internal/analyzer"
-	"github.com/davidgrldo/dockerfile-optimizer/internal/parser"
+	"github.com/davidgrldo/dockerfile-optimizer/internal/dockerfile"
 	"github.com/davidgrldo/dockerfile-optimizer/internal/report"
 )
 
@@ -34,24 +34,40 @@ func main() {
 	}
 	path := args[0]
 
-	lines, err := parser.ParseDockerfile(path)
+	file, err := os.Open(path)
 	if os.IsNotExist(err) {
 		log.Fatalf("❌ File not found: %s", path)
 	}
 	if err != nil {
+		log.Fatalf("Failed to open Dockerfile: %v", err)
+	}
+	defer file.Close()
+
+	doc, err := dockerfile.Parse(path, file)
+	if err != nil {
 		log.Fatalf("Failed to parse Dockerfile: %v", err)
 	}
 
-	var stack string
+	var stack analyzer.Stack
 	if *stackOverride != "" {
-		stack = *stackOverride
+		stack, err = analyzer.ParseStack(*stackOverride)
+		if err != nil {
+			log.Fatal(err)
+		}
 	} else {
-		stack = analyzer.DetectStack(lines)
+		stack = analyzer.DetectStack(doc)
 	}
-	results := analyzer.RunChecksDetailed(lines, stack)
+	result := analyzer.Analyze(doc, stack)
+	results := make([]analyzer.Suggestion, 0, len(result.Findings))
+	for _, finding := range result.Findings {
+		results = append(results, analyzer.Suggestion{
+			Description: finding.Message,
+			Severity:    string(finding.Severity),
+		})
+	}
 
 	if *jsonOutput {
-		report.PrintJSON(results, stack)
+		report.PrintJSON(results, string(stack))
 	} else {
 		fmt.Printf("🔍 Detected stack: %s\n", stack)
 		report.PrintHuman(results)
