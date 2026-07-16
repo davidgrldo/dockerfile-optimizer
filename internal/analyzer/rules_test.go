@@ -1,139 +1,176 @@
 package analyzer
 
 import (
-	"strings"
+	"reflect"
+	"sort"
 	"testing"
 )
 
-// A minimal set of rules for testing
-var testRules = []Rule{
-	{
-		Description: "Avoid latest tag",
-		Stack:       "generic",
-		Severity:    "warn",
-		Check: func(lines []string) string {
-			for _, l := range lines {
-				if strings.Contains(l, ":latest") {
-					return "Avoid using :latest"
+func TestProductionRuleRegistry(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		stack   Stack
+		present []string
+		absent  []string
+	}{
+		{"comment ignored", "# FROM ubuntu:latest\nFROM alpine:3.20\n", StackGeneric, nil, []string{"GEN001"}},
+		{"lowercase latest", "from ubuntu:latest\n", StackGeneric, []string{"GEN001"}, nil},
+		{"multiline static build", "FROM golang AS build\nRUN echo prep \\\n && go build -o /app\nFROM scratch\n", StackGo, []string{"GO002"}, nil},
+		{"third final stage", "FROM golang AS build\nRUN CGO_ENABLED=0 go build\nFROM alpine AS prep\nRUN true\nFROM golang\n", StackGo, []string{"GO003"}, nil},
+		{"normal CGO runtime", "FROM golang AS build\nRUN go build -o /app\nFROM debian:bookworm-slim\n", StackGo, nil, []string{"GO002"}},
+		{"cargo is not Go build", "FROM alpine AS build\nRUN cargo build\nFROM scratch\n", StackGo, nil, []string{"GO002"}},
+		{"punctuated Go build", "FROM golang AS build\nRUN go build; echo done\nFROM scratch\n", StackGo, []string{"GO002"}, nil},
+		{"prefixed CGO variable", "FROM golang AS build\nRUN NOT_CGO_ENABLED=0 go build\nFROM scratch\n", StackGo, []string{"GO002"}, nil},
+		{"exact CGO assignment", "FROM golang AS build\nRUN CGO_ENABLED=0 go build\nFROM scratch\n", StackGo, nil, []string{"GO002"}},
+		{"spaced CGO assignment", "FROM golang AS build\nRUN CGO_ENABLED = 0 go build\nFROM scratch\n", StackGo, nil, []string{"GO002"}},
+		{"unrelated Golang substring", "FROM alpine AS build\nFROM acme/notgolang-runtime\n", StackGo, nil, []string{"GO003"}},
+		{"PHP flags independent", "FROM php:8.4\nRUN composer install --no-dev\n", StackPHP, []string{"PHP002"}, []string{"PHP001"}},
+		{"PHP spaced command", "FROM php:8.4\nRUN composer   install\n", StackPHP, []string{"PHP001", "PHP002"}, nil},
+		{"PHP prefixed command ignored", "FROM php:8.4\nRUN notcomposer install\n", StackPHP, nil, []string{"PHP001", "PHP002"}},
+		{"Go single stage", "FROM alpine:3.20\n", StackGo, []string{"GO001"}, nil},
+		{"Java full runtime", "FROM openjdk:17\n", StackJava, []string{"JAVA001"}, nil},
+		{"Java slim runtime", "FROM openjdk:17-slim\n", StackJava, nil, []string{"JAVA001"}},
+		{"Rust single stage", "FROM rust:1.88\n", StackRust, []string{"RUST001"}, nil},
+		{"dotnet untagged", "FROM mcr.microsoft.com/dotnet/runtime\n", StackDotNet, []string{"DOTNET001"}, nil},
+		{"dotnet latest handled generically", "FROM mcr.microsoft.com/dotnet/runtime:latest\n", StackDotNet, []string{"GEN001"}, []string{"DOTNET001"}},
+		{"PHP both flags missing", "FROM php:8.4\nRUN composer install\n", StackPHP, []string{"PHP001", "PHP002"}, nil},
+		{"Ruby deployment mode", "FROM ruby:3.4\nRUN bundle install\n", StackRuby, []string{"RUBY001"}, nil},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := Analyze(parseTestDocument(t, test.input), test.stack)
+			ids := make(map[string]bool, len(result.Findings))
+			for _, finding := range result.Findings {
+				ids[finding.ID] = true
+				if finding.Range.StartLine == 0 || finding.Range.EndLine < finding.Range.StartLine {
+					t.Errorf("finding %s has invalid range: %#v", finding.ID, finding.Range)
+				}
+				if finding.Stage == nil {
+					t.Errorf("finding %s has no stage", finding.ID)
 				}
 			}
-			return ""
-		},
-	},
-	{
-		Description: "Multi-stage build for Go",
-		Stack:       "go",
-		Severity:    "info",
-		Check: func(lines []string) string {
-			count := 0
-			for _, l := range lines {
-				if strings.HasPrefix(strings.ToUpper(l), "FROM") {
-					count++
+			for _, id := range test.present {
+				if !ids[id] {
+					t.Errorf("finding %s absent; got %#v", id, result.Findings)
 				}
 			}
-			if count < 2 {
-				return "Use multi-stage builds"
+			for _, id := range test.absent {
+				if ids[id] {
+					t.Errorf("finding %s present; got %#v", id, result.Findings)
+				}
 			}
-			return ""
-		},
-	},
-}
-
-func TestRunChecksDetailed(t *testing.T) {
-	// Temporarily override the global rules
-	oldRules := rules
-	rules = testRules
-	defer func() { rules = oldRules }()
-
-	// Case 1: Go Dockerfile with latest tag and single stage
-	lines1 := []string{
-		"FROM golang:latest",
-		"RUN go build -o app",
-	}
-	got := RunChecksDetailed(lines1, "go")
-	if len(got) != 2 {
-		t.Errorf("Expected 2 suggestions, got %d", len(got))
-	}
-
-	// Check descriptions and severities
-	found := map[string]string{} // desc -> severity
-	for _, s := range got {
-		found[s.Description] = s.Severity
-	}
-	if found["Avoid using :latest"] != "warn" {
-		t.Error("Expected severity warn for latest-tag rule")
-	}
-	if found["Use multi-stage builds"] != "info" {
-		t.Error("Expected severity info for multi-stage rule")
-	}
-
-	// Case 2: Java Dockerfile (generic rule only)
-	lines2 := []string{
-		"FROM openjdk:latest",
-		"COPY . /app",
-	}
-	got2 := RunChecksDetailed(lines2, "java")
-	if len(got2) != 1 {
-		t.Errorf("Expected 1 suggestion for generic rule, got %d", len(got2))
-	}
-	if got2[0].Description != "Avoid using :latest" {
-		t.Errorf("Unexpected suggestion: %s", got2[0].Description)
+		})
 	}
 }
 
-func TestRunChecks(t *testing.T) {
-	// Temporarily override global rules
-	oldRules := rules
-	defer func() { rules = oldRules }()
-
-	// Create test rules
-	rules = []Rule{
+func TestGoFindingRangesAndStages(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		id    string
+		start int
+		end   int
+		stage int
+	}{
 		{
-			Description: "Disallow latest tag",
-			Stack:       "generic",
-			Check: func(lines []string) string {
-				for _, l := range lines {
-					if strings.Contains(l, ":latest") {
-						return "Avoid using :latest"
-					}
-				}
-				return ""
-			},
+			name:  "GO002 logical RUN range",
+			input: "FROM golang AS build\nRUN echo prep \\\n && go build -o /app\nFROM scratch\n",
+			id:    "GO002",
+			start: 2,
+			end:   3,
+			stage: 0,
 		},
 		{
-			Description: "Use multi-stage build for Go",
-			Stack:       "go",
-			Check: func(lines []string) string {
-				count := 0
-				for _, l := range lines {
-					if strings.HasPrefix(strings.ToUpper(l), "FROM") {
-						count++
-					}
-				}
-				if count < 2 {
-					return "Use multi-stage builds"
-				}
-				return ""
-			},
+			name:  "GO003 actual final FROM",
+			input: "FROM golang AS build\nRUN CGO_ENABLED=0 go build\nFROM alpine AS prep\nRUN true\nFROM golang\n",
+			id:    "GO003",
+			start: 5,
+			end:   5,
+			stage: 2,
 		},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := Analyze(parseTestDocument(t, test.input), StackGo)
+			for _, finding := range result.Findings {
+				if finding.ID != test.id {
+					continue
+				}
+				if finding.Range.StartLine != test.start || finding.Range.EndLine != test.end || finding.Stage == nil || *finding.Stage != test.stage {
+					t.Fatalf("finding=%#v, want lines %d-%d stage %d", finding, test.start, test.end, test.stage)
+				}
+				return
+			}
+			t.Fatalf("finding %s absent; got %#v", test.id, result.Findings)
+		})
+	}
+}
 
-	// Run against a Go Dockerfile with one FROM
-	lines := []string{
-		"FROM golang:latest",
-		"RUN go build -o app",
+func TestAnalyzeGenericRunsOnlyGenericRulesAndIsUnsupported(t *testing.T) {
+	result := Analyze(parseTestDocument(t, "FROM alpine:latest\n"), StackGeneric)
+	if result.Supported {
+		t.Fatal("generic analysis must not claim stack-specific support")
+	}
+	if len(result.Findings) != 1 || result.Findings[0].ID != "GEN001" {
+		t.Fatalf("findings=%#v, want only GEN001", result.Findings)
+	}
+}
+
+func TestRuleRegistryMetadata(t *testing.T) {
+	wantIDs := []string{"DOTNET001", "GEN001", "GO001", "GO002", "GO003", "JAVA001", "PHP001", "PHP002", "RUBY001", "RUST001"}
+	wantSeverity := map[string]Severity{
+		"GEN001":    SeverityWarn,
+		"GO001":     SeverityWarn,
+		"GO002":     SeverityError,
+		"GO003":     SeverityWarn,
+		"JAVA001":   SeverityInfo,
+		"RUST001":   SeverityWarn,
+		"DOTNET001": SeverityWarn,
+		"PHP001":    SeverityWarn,
+		"PHP002":    SeverityWarn,
+		"RUBY001":   SeverityInfo,
 	}
 
-	// Expect both rules to trigger
-	findings := RunChecks(lines, "go")
+	rules := Rules()
+	gotIDs := make([]string, 0, len(rules))
+	seen := make(map[string]bool, len(rules))
+	for _, rule := range rules {
+		if seen[rule.ID()] {
+			t.Errorf("duplicate rule ID %q", rule.ID())
+		}
+		seen[rule.ID()] = true
+		gotIDs = append(gotIDs, rule.ID())
+		if got := rule.Severity(); got != wantSeverity[rule.ID()] {
+			t.Errorf("rule %s severity=%q want=%q", rule.ID(), got, wantSeverity[rule.ID()])
+		}
+	}
+	sort.Strings(gotIDs)
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("rule IDs=%v want=%v", gotIDs, wantIDs)
+	}
+}
 
-	if len(findings) != 2 {
-		t.Errorf("Expected 2 findings, got %d", len(findings))
+func TestRuleRegistryMetadataIsCopied(t *testing.T) {
+	rules := Rules()
+	if len(rules) == 0 {
+		t.Fatal("expected production rules")
 	}
-	if findings[0] != "Avoid using :latest" && findings[1] != "Avoid using :latest" {
-		t.Errorf("Missing expected finding for :latest tag")
+	original := rules[0]
+	originalID := original.ID()
+	rules[0] = nil
+	if Rules()[0].ID() != originalID {
+		t.Fatal("Rules returned mutable registry storage")
 	}
-	if findings[0] != "Use multi-stage builds" && findings[1] != "Use multi-stage builds" {
-		t.Errorf("Missing expected finding for multi-stage builds")
+
+	stacks := original.Stacks()
+	if len(stacks) == 0 {
+		t.Fatal("expected rule stacks")
+	}
+	originalStack := stacks[0]
+	stacks[0] = StackRuby
+	if original.Stacks()[0] != originalStack {
+		t.Fatal("Stacks returned mutable rule storage")
 	}
 }
