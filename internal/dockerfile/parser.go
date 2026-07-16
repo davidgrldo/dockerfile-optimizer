@@ -32,7 +32,7 @@ func Parse(name string, r io.Reader) (*Document, error) {
 		lines = append(lines, physicalLine{number: len(lines) + 1, text: scanner.Text()})
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, &ParseError{Source: name, Line: len(lines) + 1, Message: err.Error()}
+		return nil, fmt.Errorf("%s:%d: %w", name, len(lines)+1, err)
 	}
 
 	var logical string

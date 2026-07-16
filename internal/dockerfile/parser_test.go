@@ -45,6 +45,18 @@ func TestParseMalformedFrom(t *testing.T) {
 	}
 }
 
+func TestParsePreservesReadErrorIdentity(t *testing.T) {
+	want := errors.New("read failed")
+	_, err := Parse("Dockerfile", failingReader{err: want})
+	if !errors.Is(err, want) {
+		t.Fatalf("error=%v, want wrapped %v", err, want)
+	}
+	var parseErr *ParseError
+	if errors.As(err, &parseErr) {
+		t.Fatalf("read error must not be ParseError: %#v", err)
+	}
+}
+
 func TestParseContinuationIgnoresBlankLine(t *testing.T) {
 	doc, err := Parse("Dockerfile", strings.NewReader("FROM alpine\nRUN echo one \\\n\n && echo two\n"))
 	if err != nil {
@@ -124,3 +136,7 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
