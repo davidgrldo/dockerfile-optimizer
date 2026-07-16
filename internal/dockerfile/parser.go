@@ -13,6 +13,11 @@ import (
 
 const maxScannerToken = 4 * 1024 * 1024
 
+type physicalLine struct {
+	number int
+	text   string
+}
+
 func Parse(name string, r io.Reader) (*Document, error) {
 	doc := &Document{
 		Name:         name,
@@ -22,16 +27,23 @@ func Parse(name string, r io.Reader) (*Document, error) {
 	}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	lines := []physicalLine{}
+	for scanner.Scan() {
+		lines = append(lines, physicalLine{number: len(lines) + 1, text: scanner.Text()})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, &ParseError{Source: name, Line: len(lines) + 1, Message: err.Error()}
+	}
 
 	var logical string
 	start := 0
 	end := 0
-	line := 0
 	continued := false
 
-	for scanner.Scan() {
-		line++
-		physical := scanner.Text()
+	for next := 0; next < len(lines); {
+		line := lines[next]
+		next++
+		physical := line.text
 		trimmed := strings.TrimSpace(physical)
 		if trimmed == "" {
 			continue
@@ -45,10 +57,10 @@ func Parse(name string, r io.Reader) (*Document, error) {
 			continue
 		}
 		if !continued {
-			start = line
+			start = line.number
 			logical = ""
 		}
-		end = line
+		end = line.number
 
 		var text string
 		continued, text = stripContinuation(physical, doc.EscapeToken)
@@ -61,28 +73,60 @@ func Parse(name string, r io.Reader) (*Document, error) {
 		if continued {
 			continue
 		}
-		if err := parseAndAdd(doc, logical, start, end); err != nil {
+		var err error
+		next, err = parseAndAdd(doc, logical, start, end, lines, next)
+		if err != nil {
 			return nil, err
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, &ParseError{Source: name, Line: line + 1, Message: err.Error()}
-	}
 	if continued {
-		if err := parseAndAdd(doc, logical, start, end); err != nil {
+		if _, err := parseAndAdd(doc, logical, start, end, lines, len(lines)); err != nil {
 			return nil, err
 		}
 	}
 	return doc, nil
 }
 
-func parseAndAdd(doc *Document, text string, start, end int) error {
+func parseAndAdd(doc *Document, text string, start, end int, lines []physicalLine, next int) (int, error) {
 	instruction, err := parseInstruction(doc.Name, text, start, end)
 	if err != nil {
-		return err
+		return next, err
+	}
+	for _, delimiter := range heredocDelimiters(instruction.Value) {
+		found := false
+		for next < len(lines) {
+			line := lines[next]
+			next++
+			if strings.TrimSpace(line.text) == delimiter {
+				instruction.Range.EndLine = line.number
+				found = true
+				break
+			}
+		}
+		if !found {
+			return next, &ParseError{Source: doc.Name, Line: start, Message: "unterminated heredoc " + delimiter}
+		}
 	}
 	doc.addInstruction(instruction)
-	return nil
+	return next, nil
+}
+
+func heredocDelimiters(value string) []string {
+	var delimiters []string
+	for _, field := range strings.Fields(value) {
+		if !strings.HasPrefix(field, "<<") {
+			continue
+		}
+		delimiter := strings.TrimPrefix(field, "<<")
+		delimiter = strings.TrimPrefix(delimiter, "-")
+		if len(delimiter) >= 2 && (delimiter[0] == '\'' && delimiter[len(delimiter)-1] == '\'' || delimiter[0] == '"' && delimiter[len(delimiter)-1] == '"') {
+			delimiter = delimiter[1 : len(delimiter)-1]
+		}
+		if delimiter != "" {
+			delimiters = append(delimiters, delimiter)
+		}
+	}
+	return delimiters
 }
 
 func parseInstruction(source, text string, start, end int) (Instruction, error) {

@@ -66,3 +66,61 @@ func TestParseContinuationIgnoresCommentLine(t *testing.T) {
 		t.Fatalf("run=%#v", run)
 	}
 }
+
+func TestParseContinuationRange(t *testing.T) {
+	doc, err := Parse("Dockerfile", strings.NewReader("FROM golang AS build\nRUN echo prep \\\n && go build -o /app\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := doc.Stages[0].Instructions[0]
+	if run.Value != "echo prep && go build -o /app" || run.Range != (Range{StartLine: 2, EndLine: 3}) {
+		t.Fatalf("run=%#v", run)
+	}
+}
+
+func TestParseCustomEscapeAndJSON(t *testing.T) {
+	input := "# escape=`\nFROM windows/servercore:ltsc2022`\n AS runtime\nCMD [\"cmd\", \"/C\", \"echo ok\"]\n"
+	doc, err := Parse("Dockerfile", strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.EscapeToken != '`' || doc.Stages[0].Name != "runtime" || !doc.Stages[0].Instructions[0].JSON {
+		t.Fatalf("doc=%#v", doc)
+	}
+}
+
+func TestParseHeredocIsolation(t *testing.T) {
+	input := "FROM alpine\nRUN <<EOF\nFROM rust:latest\ngo build ./...\nEOF\nRUN echo done\n"
+	doc, err := Parse("Dockerfile", strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Instructions) != 3 {
+		t.Fatalf("instructions=%d", len(doc.Instructions))
+	}
+	if got := doc.Stages[0].Instructions[0].Range; got != (Range{StartLine: 2, EndLine: 5}) {
+		t.Fatalf("range=%#v", got)
+	}
+}
+
+func TestParseUnterminatedHeredoc(t *testing.T) {
+	_, err := Parse("Dockerfile", strings.NewReader("FROM alpine\nRUN <<EOF\necho hi\n"))
+	if err == nil || !strings.Contains(err.Error(), "unterminated heredoc EOF") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func FuzzParse(f *testing.F) {
+	f.Add("FROM alpine\nRUN echo ok\n")
+	f.Fuzz(func(t *testing.T, input string) {
+		doc, err := Parse("fuzz", strings.NewReader(input))
+		if err != nil {
+			return
+		}
+		for _, item := range doc.Instructions {
+			if item.Range.StartLine < 1 || item.Range.EndLine < item.Range.StartLine {
+				t.Fatalf("range=%#v", item.Range)
+			}
+		}
+	})
+}
