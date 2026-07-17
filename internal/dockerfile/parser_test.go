@@ -133,6 +133,16 @@ func TestParseUnterminatedHeredoc(t *testing.T) {
 	}
 }
 
+func TestParseHereStringIsNotHeredoc(t *testing.T) {
+	doc, err := Parse("Dockerfile", strings.NewReader("FROM alpine:3.19\nRUN cat <<<\"inline\"\nRUN echo done\n"))
+	if err != nil {
+		t.Fatalf("here-string must not be treated as a heredoc: %v", err)
+	}
+	if len(doc.Instructions) != 3 {
+		t.Fatalf("instructions=%d, want 3", len(doc.Instructions))
+	}
+}
+
 func FuzzParse(f *testing.F) {
 	f.Add("FROM alpine\nRUN echo ok\n")
 	f.Fuzz(func(t *testing.T, input string) {

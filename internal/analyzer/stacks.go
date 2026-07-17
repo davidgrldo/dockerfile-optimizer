@@ -103,10 +103,10 @@ func lookupStack(stack Stack) (stackDefinition, bool) {
 
 func stackRuleIDs(stack Stack) []string {
 	ids := []string{}
-	for _, rule := range Rules() {
-		for _, assigned := range rule.Stacks() {
+	for _, r := range registeredRules {
+		for _, assigned := range r.stacks {
 			if assigned == stack {
-				ids = append(ids, rule.ID())
+				ids = append(ids, r.id)
 				break
 			}
 		}

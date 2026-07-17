@@ -26,39 +26,30 @@ type Result struct {
 	Findings      []Finding
 }
 
-type Context struct {
-	Stack Stack
-}
-
-type Rule interface {
-	ID() string
-	Severity() Severity
-	Stacks() []Stack
-	Evaluate(*dockerfile.Document, Context) []Finding
-}
-
-func Analyze(doc *dockerfile.Document, selected Stack) Result {
+// Analyze runs the applicable rules over doc. override selects a stack
+// explicitly; an empty override uses the detected stack.
+func Analyze(doc *dockerfile.Document, override Stack) Result {
+	detected := DetectStack(doc)
+	selected := detected
+	if override != "" {
+		selected = override
+	}
 	result := Result{
 		Source:        doc.Name,
-		DetectedStack: DetectStack(doc),
+		DetectedStack: detected,
 		SelectedStack: selected,
 		Supported:     IsSupported(selected),
 		Findings:      []Finding{},
 	}
-	context := Context{Stack: selected}
-	for _, rule := range Rules() {
-		if appliesTo(rule, selected) {
-			result.Findings = append(result.Findings, rule.Evaluate(doc, context)...)
+	for _, r := range registeredRules {
+		if !r.appliesTo(selected) {
+			continue
+		}
+		for _, f := range r.check(doc) {
+			f.ID = r.id
+			f.Severity = r.severity
+			result.Findings = append(result.Findings, f)
 		}
 	}
 	return result
-}
-
-func appliesTo(rule Rule, selected Stack) bool {
-	for _, stack := range rule.Stacks() {
-		if stack == StackGeneric || stack == selected {
-			return true
-		}
-	}
-	return false
 }

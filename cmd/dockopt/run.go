@@ -30,8 +30,14 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 	if err := flags.Parse(args); err != nil {
 		return writeFailure(stdout, stderr, jsonRequested, "usage_error", err)
 	}
-	if flags.NArg() != 1 {
-		return writeFailure(stdout, stderr, *jsonMode, "usage_error", errors.New("expected exactly one Dockerfile path"))
+	paths := flags.Args()
+	if len(paths) < 1 {
+		return writeFailure(stdout, stderr, *jsonMode, "usage_error", errors.New("expected at least one Dockerfile path"))
+	}
+	for _, path := range paths {
+		if strings.HasPrefix(path, "-") {
+			return writeFailure(stdout, stderr, *jsonMode, "usage_error", errors.New("flags must appear before Dockerfile paths"))
+		}
 	}
 	if *failOn != "none" && *failOn != "warn" && *failOn != "error" {
 		return writeFailure(stdout, stderr, *jsonMode, "usage_error", fmt.Errorf("invalid fail-on threshold %q", *failOn))
@@ -46,10 +52,23 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 		}
 	}
 
-	path := flags.Arg(0)
+	multi := len(paths) > 1
+	exit := 0
+	for _, path := range paths {
+		if code := analyzePath(path, stdout, stderr, *jsonMode, multi, override, *failOn, open); code > exit {
+			exit = code
+		}
+	}
+	return exit
+}
+
+// analyzePath analyzes one Dockerfile and writes its result. It returns the
+// per-file exit contribution: 0 clean, 1 threshold reached, 2 could not analyze.
+// The caller keeps the maximum across all paths.
+func analyzePath(path string, stdout, stderr io.Writer, jsonMode, multi bool, override analyzer.Stack, failOn string, open func(string) (io.ReadCloser, error)) int {
 	file, err := open(path)
 	if err != nil {
-		return writeFailure(stdout, stderr, *jsonMode, "input_error", err)
+		return writeFailure(stdout, stderr, jsonMode, "input_error", err)
 	}
 
 	doc, err := dockerfile.Parse(path, file)
@@ -60,27 +79,29 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 		if errors.As(err, &parseErr) {
 			kind = "parse_error"
 		}
-		return writeFailure(stdout, stderr, *jsonMode, kind, err)
+		return writeFailure(stdout, stderr, jsonMode, kind, err)
 	}
 	if closeErr != nil {
-		return writeFailure(stdout, stderr, *jsonMode, "input_error", fmt.Errorf("close %s: %w", path, closeErr))
+		return writeFailure(stdout, stderr, jsonMode, "input_error", fmt.Errorf("close %s: %w", path, closeErr))
 	}
-	selected := analyzer.DetectStack(doc)
-	if *stackName != "" {
-		selected = override
-	}
-	result := analyzer.Analyze(doc, selected)
+	result := analyzer.Analyze(doc, override)
 
-	if *jsonMode {
+	if jsonMode {
 		err = report.WriteJSON(stdout, result)
 	} else {
+		if multi {
+			if _, herr := fmt.Fprintf(stdout, "==> %s <==\n", path); herr != nil {
+				_, _ = fmt.Fprintf(stderr, "output_error: %v\n", herr)
+				return 2
+			}
+		}
 		err = report.WriteHuman(stdout, result)
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "output_error: %v\n", err)
 		return 2
 	}
-	if meetsThreshold(result.Findings, *failOn) {
+	if meetsThreshold(result.Findings, failOn) {
 		return 1
 	}
 	return 0
