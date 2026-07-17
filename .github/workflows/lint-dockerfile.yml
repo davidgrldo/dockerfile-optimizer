@@ -35,9 +35,11 @@ jobs:
       - name: Verify fixture exit contracts
         shell: bash
         run: |
-          clean_json="$(./dockopt --json testdata/dockerfiles/clean.Dockerfile)"
-          printf '%s\n' "$clean_json"
-          grep -Fq '"findings":[]' <<<"$clean_json"
+          for fixture in clean clean-go-env complex-multistage; do
+            json="$(./dockopt --json "testdata/dockerfiles/$fixture.Dockerfile")"
+            printf '%s: %s\n' "$fixture" "$json"
+            grep -Fq '"findings":[]' <<<"$json"
+          done
           ./dockopt --json testdata/dockerfiles/unsupported-python.Dockerfile
 
           set +e
@@ -45,7 +47,20 @@ jobs:
           error_status=$?
           ./dockopt --json testdata/dockerfiles/malformed.Dockerfile >/tmp/parse.json
           parse_status=$?
+          ./dockopt --fail-on warn testdata/dockerfiles/warn-untagged.Dockerfile >/tmp/untagged.txt
+          untagged_status=$?
+          ./dockopt --fail-on warn testdata/dockerfiles/warn-apt.Dockerfile >/tmp/apt.txt
+          apt_status=$?
+          # aggregate exit: one clean + one unparseable must surface as 2
+          ./dockopt --json testdata/dockerfiles/clean.Dockerfile testdata/dockerfiles/malformed.Dockerfile >/tmp/multi.jsonl
+          multi_status=$?
           set -e
 
           test "$error_status" = "1"
           test "$parse_status" = "2"
+          test "$untagged_status" = "1"
+          grep -Fq 'GEN001' /tmp/untagged.txt
+          test "$apt_status" = "1"
+          for id in GEN002 GEN003 GEN004 GEN005; do grep -Fq "$id" /tmp/apt.txt; done
+          test "$multi_status" = "2"
+          test "$(grep -c '"schema_version"' /tmp/multi.jsonl)" = "2"

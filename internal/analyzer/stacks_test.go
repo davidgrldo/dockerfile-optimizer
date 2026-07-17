@@ -89,7 +89,7 @@ func TestStackValidationAndSupport(t *testing.T) {
 
 func TestStackRuleIDsComeFromRegisteredRules(t *testing.T) {
 	want := map[Stack][]string{
-		StackGeneric: {"GEN001"},
+		StackGeneric: {"GEN001", "GEN002", "GEN003", "GEN004", "GEN005"},
 		StackGo:      {"GO001", "GO002", "GO003"},
 		StackJava:    {"JAVA001"},
 		StackPython:  {},

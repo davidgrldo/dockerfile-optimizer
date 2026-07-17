@@ -115,6 +115,9 @@ func heredocDelimiters(value string) []string {
 		if !strings.HasPrefix(field, "<<") {
 			continue
 		}
+		if strings.HasPrefix(field, "<<<") { // bash here-string, not a heredoc
+			continue
+		}
 		delimiter := strings.TrimPrefix(field, "<<")
 		delimiter = strings.TrimPrefix(delimiter, "-")
 		if len(delimiter) >= 2 && (delimiter[0] == '\'' && delimiter[len(delimiter)-1] == '\'' || delimiter[0] == '"' && delimiter[len(delimiter)-1] == '"') {

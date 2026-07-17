@@ -40,6 +40,125 @@ func TestRunWarningThreshold(t *testing.T) {
 	}
 }
 
+func TestRunCleanGoEnvCGO(t *testing.T) {
+	stdout, stderr, code := runWithBuffers("--json", fixturePath("clean-go-env"))
+	if code != 0 {
+		t.Fatalf("code=%d, stderr=%q", code, stderr)
+	}
+	var output report.Output
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output %q: %v", stdout, err)
+	}
+	if output.Stack.Selected != analyzer.StackGo || len(output.Findings) != 0 {
+		t.Fatalf("CGO disabled via ENV must be clean: output=%#v", output)
+	}
+}
+
+func TestRunUntaggedBaseWarns(t *testing.T) {
+	stdout, stderr, code := runWithBuffers("--fail-on", "warn", fixturePath("warn-untagged"))
+	if code != 1 || !strings.Contains(stdout, "GEN001") {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestRunHeredocAndHereStringParse(t *testing.T) {
+	stdout, stderr, code := runWithBuffers("--json", fixturePath("heredoc-herestring"))
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var output report.Output
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output %q: %v", stdout, err)
+	}
+}
+
+func TestRunComplexMultistageIsClean(t *testing.T) {
+	stdout, stderr, code := runWithBuffers("--json", fixturePath("complex-multistage"))
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var output report.Output
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output %q: %v", stdout, err)
+	}
+	if output.Stack.Detected != analyzer.StackGo || len(output.Findings) != 0 {
+		t.Fatalf("complex multi-stage build must parse clean: output=%#v", output)
+	}
+}
+
+func TestRunMultipleFilesEmitJSONLines(t *testing.T) {
+	stdout, stderr, code := runWithBuffers("--json", fixturePath("clean"), fixturePath("warn-latest"))
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 NDJSON lines, got %d: %q", len(lines), stdout)
+	}
+	for _, line := range lines {
+		var out report.Output
+		if err := json.Unmarshal([]byte(line), &out); err != nil {
+			t.Fatalf("line %q not a valid Output: %v", line, err)
+		}
+	}
+}
+
+func TestRunMultipleFilesTakeMaxExitCode(t *testing.T) {
+	// clean (0) + error-go-static (error finding -> 1) => 1
+	if _, _, code := runWithBuffers(fixturePath("clean"), fixturePath("error-go-static")); code != 1 {
+		t.Fatalf("threshold aggregate code=%d, want 1", code)
+	}
+	// clean (0) + malformed (parse error -> 2) => 2, even though clean is fine
+	if _, _, code := runWithBuffers("--json", fixturePath("clean"), fixturePath("malformed")); code != 2 {
+		t.Fatalf("parse-error aggregate code=%d, want 2", code)
+	}
+}
+
+func TestRunMultipleFilesHumanHeaders(t *testing.T) {
+	stdout, stderr, code := runWithBuffers(fixturePath("generic"), fixturePath("warn-latest"))
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d, stderr=%q", code, stderr)
+	}
+	for _, path := range []string{fixturePath("generic"), fixturePath("warn-latest")} {
+		if !strings.Contains(stdout, "==> "+path+" <==") {
+			t.Fatalf("missing header for %s in %q", path, stdout)
+		}
+	}
+}
+
+func TestRunFlagAfterPathIsUsageError(t *testing.T) {
+	_, stderr, code := runWithBuffers(fixturePath("clean"), fixturePath("generic"), "--json")
+	if code != 2 || !strings.Contains(stderr, "usage_error") {
+		t.Fatalf("code=%d, stderr=%q", code, stderr)
+	}
+}
+
+func TestRunAptAntiPatternsWarn(t *testing.T) {
+	// default threshold is error: four warn-grade findings do not fail the build.
+	stdout, stderr, code := runWithBuffers("--json", fixturePath("warn-apt"))
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var output report.Output
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output %q: %v", stdout, err)
+	}
+	ids := make(map[string]bool, len(output.Findings))
+	for _, finding := range output.Findings {
+		ids[finding.ID] = true
+	}
+	for _, want := range []string{"GEN002", "GEN003", "GEN004", "GEN005"} {
+		if !ids[want] {
+			t.Errorf("finding %s absent; got %#v", want, output.Findings)
+		}
+	}
+
+	// under --fail-on warn the same findings fail the build.
+	if _, _, code := runWithBuffers("--fail-on", "warn", fixturePath("warn-apt")); code != 1 {
+		t.Fatalf("warn threshold code=%d, want 1", code)
+	}
+}
+
 func TestRunStaticGoError(t *testing.T) {
 	stdout, stderr, code := runWithBuffers(fixturePath("error-go-static"))
 	if code != 1 || !strings.Contains(stdout, "GO002") {
