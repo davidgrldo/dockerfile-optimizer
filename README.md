@@ -1,10 +1,39 @@
-# Dockerfile Optimizer
+<div align="center">
 
-`dockopt` analyzes one Dockerfile with generic and stack-aware rules. It understands Dockerfile stages, multiline instructions, source ranges, and JSON instructions, and emits stable rule IDs for CI use.
+# 🐳 Dockerfile Optimizer
 
-## Installation
+**A fast, stack-aware Dockerfile linter that catches image bloat and bad-practice patterns — with stable rule IDs and CI-friendly output.**
 
-Build from source with Go 1.24 or newer:
+[![Verify](https://github.com/davidgrldo/dockerfile-optimizer/actions/workflows/lint-dockerfile.yml/badge.svg)](https://github.com/davidgrldo/dockerfile-optimizer/actions/workflows/lint-dockerfile.yml)
+[![Go](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Go Report Card](https://goreportcard.com/badge/github.com/davidgrldo/dockerfile-optimizer)](https://goreportcard.com/report/github.com/davidgrldo/dockerfile-optimizer)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)
+
+</div>
+
+`dockopt` parses your Dockerfiles into a real instruction model — stages, multi-line
+instructions, heredocs, JSON/exec form, and `# escape` directives — then runs generic and
+stack-specific rules over the result. No regex-on-raw-lines guessing, so rules don't misfire
+on comments, casing, or line continuations.
+
+## Highlights
+
+- **🎯 Stack-aware** — detects Go, Java, Rust, .NET, PHP, and Ruby and runs targeted rules (plus generic checks for Python, Node.js, and C/C++).
+- **🧠 Real parser** — understands stages, continuations, heredocs, and JSON instructions instead of grepping raw lines.
+- **⚙️ Built for CI** — stable rule IDs, a configurable failure threshold, and precise exit codes.
+- **📦 Batch + streaming** — analyze many files in one run; JSON output is [JSON Lines](https://jsonlines.org/), ready for `jq`.
+- **🪶 Zero dependencies** — a single static Go binary. Fuzz- and race-tested.
+
+## Quick start
+
+Install with Go 1.24 or newer:
+
+```bash
+go install github.com/davidgrldo/dockerfile-optimizer/cmd/dockopt@latest
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/davidgrldo/dockerfile-optimizer.git
@@ -12,7 +41,18 @@ cd dockerfile-optimizer
 go build -o dockopt ./cmd/dockopt
 ```
 
-The module has no third-party Go dependencies.
+Then point it at a Dockerfile:
+
+```console
+$ dockopt Dockerfile
+Detected stack: go
+Stack-specific checks enabled.
+[warn] GEN001 (line 1): Avoid using 'latest' tag in base images
+[warn] GEN002 (line 2): Add '--no-install-recommends' to 'apt-get install' to avoid pulling optional packages
+[warn] GEN003 (line 2): Remove the apt cache in the same RUN (rm -rf /var/lib/apt/lists/*) to keep the layer small
+[warn] GO001 (line 1): Consider using multi-stage builds in Go to reduce final image size
+[warn] GO003 (line 1): Avoid using golang image in final stage; copy binary to scratch/distroless/alpine
+```
 
 ## Usage
 
@@ -24,11 +64,9 @@ Options must appear before the Dockerfile paths:
 
 - `--json` writes the versioned JSON result instead of human-readable output.
 - `--stack <name>` overrides detection with a validated stack name (applied to every path).
-- `--fail-on none|warn|error` selects the failure threshold. The default failure threshold is `error`.
+- `--fail-on none|warn|error` selects the failure threshold. The default is `error`.
 
-The threshold controls only the process status; findings below the threshold remain in the output.
-
-Examples:
+The threshold controls only the process status; findings below the threshold still appear in the output.
 
 ```bash
 ./dockopt Dockerfile
@@ -49,6 +87,18 @@ Pass more than one path to analyze a batch; use your shell's globbing to expand 
 - JSON output is emitted as [JSON Lines](https://jsonlines.org/): one result object (same schema below) per line, including a per-file error envelope for any file that fails to parse. This streams cleanly into `jq -c`.
 - The exit code is the most severe outcome across all paths (`2` over `1` over `0`), so one unparseable file surfaces as `2` even when the rest are clean.
 
+### In CI
+
+`dockopt` is a single binary with no runtime dependencies, so it drops into any pipeline. A GitHub Actions step that fails the build on any warning or worse:
+
+```yaml
+- uses: actions/setup-go@v5
+  with:
+    go-version: "1.24"
+- run: go install github.com/davidgrldo/dockerfile-optimizer/cmd/dockopt@latest
+- run: dockopt --fail-on warn $(git ls-files '*Dockerfile')
+```
+
 ## Exit codes
 
 - `0`: analysis completed and no finding reached the configured threshold.
@@ -59,19 +109,19 @@ Analysis results are written to stdout. Operational diagnostics are written to s
 
 ## Stack support
 
-Go, Java, Rust, .NET, PHP, and Ruby have stack-specific rules. Python, Node, and C/C++ are detected but receive generic checks only.
+Go, Java, Rust, .NET, PHP, and Ruby have stack-specific rules. Python, Node.js, and C/C++ are detected but receive generic checks only.
 
 | Stack | Override | Stack-specific rules |
 | --- | --- | --- |
-| Go | `go` | Yes |
-| Java | `java` | Yes |
-| Rust | `rust` | Yes |
-| .NET | `dotnet` | Yes |
-| PHP | `php` | Yes |
-| Ruby | `ruby` | Yes |
-| Python | `python` | No; generic checks only |
-| Node.js | `node` | No; generic checks only |
-| C/C++ | `c_cpp` | No; generic checks only |
+| Go | `go` | ✅ |
+| Java | `java` | ✅ |
+| Rust | `rust` | ✅ |
+| .NET | `dotnet` | ✅ |
+| PHP | `php` | ✅ |
+| Ruby | `ruby` | ✅ |
+| Python | `python` | ⬜ generic checks only |
+| Node.js | `node` | ⬜ generic checks only |
+| C/C++ | `c_cpp` | ⬜ generic checks only |
 
 Generic Dockerfile rules run for every stack.
 
@@ -96,7 +146,7 @@ Rule IDs are stable and safe to reference in CI (e.g. to gate on a subset).
 | `PHP002` | warn | php | `composer install` without `--optimize-autoloader`. |
 | `RUBY001` | info | ruby | `bundle install` without `--deployment`. |
 
-The `apt-get` rules match the common `apt-get install ...` form; `apt-get -y install` (flag before the subcommand) is not detected.
+> **Known limits:** the `apt-get` rules match the common `apt-get install ...` form (not `apt-get -y install`, with the flag before the subcommand), and commands inside heredoc bodies are not analyzed.
 
 ## JSON schema
 
