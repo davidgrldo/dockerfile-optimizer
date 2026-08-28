@@ -6,7 +6,6 @@
 
 [![Verify](https://github.com/davidgrldo/dockerfile-optimizer/actions/workflows/lint-dockerfile.yml/badge.svg)](https://github.com/davidgrldo/dockerfile-optimizer/actions/workflows/lint-dockerfile.yml)
 [![Go](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white)](go.mod)
-[![Go Report Card](https://goreportcard.com/badge/github.com/davidgrldo/dockerfile-optimizer)](https://goreportcard.com/report/github.com/davidgrldo/dockerfile-optimizer)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)
 
