@@ -42,12 +42,19 @@ var registeredRules = []rule{
 	{"GEN006", SeverityWarn, []Stack{StackGeneric}, checkApkNoCache},
 	{"GEN007", SeverityWarn, []Stack{StackGeneric}, checkRpmCacheCleanup},
 	{"GEN008", SeverityWarn, []Stack{StackGeneric}, checkSecretBuildArgs},
+	{"GEN009", SeverityWarn, []Stack{StackGeneric}, checkCacheMount},
+	{"GEN010", SeverityInfo, []Stack{StackGeneric}, checkDigestPin},
 	{"GO001", SeverityWarn, []Stack{StackGo}, checkGoMultistage},
 	{"GO002", SeverityError, []Stack{StackGo}, checkGoStaticBuild},
 	{"GO003", SeverityWarn, []Stack{StackGo}, checkGoFinalImage},
+	{"GO004", SeverityWarn, []Stack{StackGo}, checkGoCopyOrder},
 	{"JAVA001", SeverityInfo, []Stack{StackJava}, checkJavaRuntime},
 	{"RUST001", SeverityWarn, []Stack{StackRust}, checkRustMultistage},
+	{"RUST002", SeverityWarn, []Stack{StackRust}, checkRustCopyOrder},
+	{"RUST003", SeverityWarn, []Stack{StackRust}, checkRustRelease},
+	{"RUST004", SeverityWarn, []Stack{StackRust}, checkRustFinalImage},
 	{"DOTNET001", SeverityWarn, []Stack{StackDotNet}, checkDotNetTag},
+	{"DOTNET002", SeverityWarn, []Stack{StackDotNet}, checkDotNetSDKFinal},
 	{"PHP001", SeverityWarn, []Stack{StackPHP}, checkComposerFlag("--no-dev", "Use 'composer install --no-dev' for production PHP builds")},
 	{"PHP002", SeverityWarn, []Stack{StackPHP}, checkComposerFlag("--optimize-autoloader", "Use 'composer install --optimize-autoloader' for production PHP builds")},
 	{"RUBY001", SeverityInfo, []Stack{StackRuby}, checkRubyDeployment},
@@ -55,6 +62,8 @@ var registeredRules = []rule{
 	{"PY002", SeverityWarn, []Stack{StackPython}, checkPipCopyOrder},
 	{"NODE001", SeverityWarn, []Stack{StackNode}, checkNpmCi},
 	{"NODE002", SeverityWarn, []Stack{StackNode}, checkNpmCopyOrder},
+	{"NODE003", SeverityWarn, []Stack{StackNode}, checkYarnPnpmFrozen},
+	{"NODE004", SeverityWarn, []Stack{StackNode}, checkNodeEnvProduction},
 	{"CCPP001", SeverityWarn, []Stack{StackCCPP}, checkCCPPFinalImage},
 }
 
@@ -166,6 +175,9 @@ func checkGoMultistage(doc *dockerfile.Document) []Finding {
 		return nil
 	}
 	stage := doc.Stages[0]
+	if !stageRunsSequence(stage, "go build", "go test", "go install") {
+		return nil
+	}
 	return []Finding{finding("Consider using multi-stage builds in Go to reduce final image size", stage.From, stage.Index)}
 }
 
@@ -252,7 +264,58 @@ func checkRustMultistage(doc *dockerfile.Document) []Finding {
 		return nil
 	}
 	stage := doc.Stages[0]
+	if !stageRunsSequence(stage, "cargo build", "cargo test", "rustc") {
+		return nil
+	}
 	return []Finding{finding("Consider using multi-stage builds in Rust to reduce final image size", stage.From, stage.Index)}
+}
+
+func checkRustCopyOrder(doc *dockerfile.Document) []Finding {
+	return checkInstallCopyOrder(doc, []string{"cargo.toml", "cargo.lock"}, func(value string) bool {
+		return containsCommandSequence(value, "cargo fetch") || containsCommandSequence(value, "cargo build") || containsCommandSequence(value, "cargo test")
+	}, "Copy Cargo.toml and Cargo.lock before COPY . so dependency layers stay cached")
+}
+
+func checkRustRelease(doc *dockerfile.Document) []Finding {
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		for _, instruction := range stage.Instructions {
+			if instruction.Opcode != "RUN" || !containsCommandSequence(instruction.Value, "cargo build") {
+				continue
+			}
+			if hasToken(instruction.Value, "--release") {
+				continue
+			}
+			findings = append(findings, finding("Add '--release' to 'cargo build' for production binaries", instruction, stage.Index))
+		}
+	}
+	return findings
+}
+
+func checkRustFinalImage(doc *dockerfile.Document) []Finding {
+	if len(doc.Stages) == 0 {
+		return nil
+	}
+	stage := doc.Stages[len(doc.Stages)-1]
+	if !strings.EqualFold(imageRepository(stage.BaseImage), "rust") {
+		return nil
+	}
+	tag := strings.ToLower(imageTag(stage.BaseImage))
+	if tag != "" && (strings.Contains(tag, "slim") || strings.Contains(tag, "alpine") || strings.Contains(tag, "distroless")) {
+		return nil
+	}
+	return []Finding{finding("Avoid using a full rust image in the final stage; copy the binary to a slim/alpine runtime", stage.From, stage.Index)}
+}
+
+func checkDotNetSDKFinal(doc *dockerfile.Document) []Finding {
+	if len(doc.Stages) == 0 {
+		return nil
+	}
+	stage := doc.Stages[len(doc.Stages)-1]
+	if !slices.Contains(imageRepositoryComponents(stage.BaseImage), "sdk") {
+		return nil
+	}
+	return []Finding{finding("Avoid using the .NET SDK image in the final stage; copy the app into aspnet or runtime", stage.From, stage.Index)}
 }
 
 func checkDotNetTag(doc *dockerfile.Document) []Finding {
@@ -375,8 +438,92 @@ func checkPipCopyOrder(doc *dockerfile.Document) []Finding {
 
 func checkNpmCopyOrder(doc *dockerfile.Document) []Finding {
 	return checkInstallCopyOrder(doc, []string{"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json"}, func(value string) bool {
-		return containsCommandSequence(value, "npm install") || containsCommandSequence(value, "npm ci") || containsCommandSequence(value, "yarn")
+		return containsCommandSequence(value, "npm install") || containsCommandSequence(value, "npm ci") || isYarnInstall(value) || containsCommandSequence(value, "pnpm install")
 	}, "Copy package.json and the lockfile before COPY . so dependency layers stay cached")
+}
+
+func checkGoCopyOrder(doc *dockerfile.Document) []Finding {
+	return checkInstallCopyOrder(doc, []string{"go.mod", "go.sum", "go.work"}, func(value string) bool {
+		return containsCommandSequence(value, "go mod download") || containsCommandSequence(value, "go mod tidy") || containsCommandSequence(value, "go build") || containsCommandSequence(value, "go install") || containsCommandSequence(value, "go test")
+	}, "Copy go.mod and go.sum before COPY . so module layers stay cached")
+}
+
+func checkYarnPnpmFrozen(doc *dockerfile.Document) []Finding {
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		for _, instruction := range stage.Instructions {
+			if instruction.Opcode != "RUN" {
+				continue
+			}
+			switch {
+			case isYarnInstall(instruction.Value):
+				if hasToken(instruction.Value, "--frozen-lockfile") || hasToken(instruction.Value, "--immutable") {
+					continue
+				}
+				findings = append(findings, finding("Use 'yarn install --frozen-lockfile' or '--immutable' for reproducible installs", instruction, stage.Index))
+			case containsCommandSequence(instruction.Value, "pnpm install"):
+				if hasToken(instruction.Value, "--frozen-lockfile") {
+					continue
+				}
+				findings = append(findings, finding("Add '--frozen-lockfile' to 'pnpm install' for reproducible installs", instruction, stage.Index))
+			}
+		}
+	}
+	return findings
+}
+
+func checkNodeEnvProduction(doc *dockerfile.Document) []Finding {
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		if stageSetsNodeEnvProduction(stage) {
+			continue
+		}
+		for _, instruction := range stage.Instructions {
+			if instruction.Opcode != "RUN" {
+				continue
+			}
+			if !isNodePackageInstall(instruction.Value) {
+				continue
+			}
+			if strings.Contains(instruction.Value, "NODE_ENV=production") {
+				continue
+			}
+			findings = append(findings, finding("Set NODE_ENV=production before installing Node.js dependencies", instruction, stage.Index))
+		}
+	}
+	return findings
+}
+
+func checkCacheMount(doc *dockerfile.Document) []Finding {
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		for _, instruction := range stage.Instructions {
+			if instruction.Opcode != "RUN" || instruction.JSON || hasCacheMount(instruction) {
+				continue
+			}
+			if message, ok := cacheMountMessage(instruction.Value); ok {
+				findings = append(findings, finding(message, instruction, stage.Index))
+			}
+		}
+	}
+	return findings
+}
+
+func checkDigestPin(doc *dockerfile.Document) []Finding {
+	stageNames := map[string]bool{}
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		image := stage.BaseImage
+		lower := strings.ToLower(image)
+		skip := strings.Contains(image, "${") || strings.Contains(image, "$") || lower == "scratch" || stageNames[lower] || strings.Contains(image, "@") || !hasImageTag(image)
+		if !skip {
+			findings = append(findings, finding("Pin the base image digest (@sha256:...) in addition to the tag", stage.From, stage.Index))
+		}
+		if stage.Name != "" {
+			stageNames[strings.ToLower(stage.Name)] = true
+		}
+	}
+	return findings
 }
 
 func checkInstallCopyOrder(doc *dockerfile.Document, lockFiles []string, isInstall func(string) bool, message string) []Finding {
@@ -500,6 +647,90 @@ func checkCCPPFinalImage(doc *dockerfile.Document) []Finding {
 
 func isNonRootBaseImage(image string) bool {
 	return strings.Contains(strings.ToLower(image), "nonroot")
+}
+
+func stageRunsSequence(stage dockerfile.Stage, sequences ...string) bool {
+	for _, instruction := range stage.Instructions {
+		if instruction.Opcode != "RUN" {
+			continue
+		}
+		for _, sequence := range sequences {
+			if containsCommandSequence(instruction.Value, sequence) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasCacheMount(instruction dockerfile.Instruction) bool {
+	for _, flag := range instruction.Flags {
+		if strings.Contains(strings.ToLower(flag), "type=cache") {
+			return true
+		}
+	}
+	return false
+}
+
+func cacheMountMessage(value string) (string, bool) {
+	switch {
+	case containsCommandSequence(value, "apt-get install"):
+		return "Use RUN --mount=type=cache,target=/var/cache/apt,sharing=locked for apt-get installs", true
+	case containsCommandSequence(value, "go build"), containsCommandSequence(value, "go test"), containsCommandSequence(value, "go install"), containsCommandSequence(value, "go mod download"):
+		return "Use RUN --mount=type=cache,target=/go/pkg/mod and target=/root/.cache/go-build for Go commands", true
+	case containsCommandSequence(value, "npm ci"), containsCommandSequence(value, "npm install"), isYarnInstall(value), containsCommandSequence(value, "pnpm install"):
+		return "Use RUN --mount=type=cache,target=/root/.npm (or the yarn/pnpm store) for Node installs", true
+	case containsCommandSequence(value, "pip install"), containsCommandSequence(value, "pip3 install"):
+		return "Use RUN --mount=type=cache,target=/root/.cache/pip for pip installs", true
+	case containsCommandSequence(value, "cargo build"), containsCommandSequence(value, "cargo fetch"):
+		return "Use RUN --mount=type=cache,target=/usr/local/cargo/registry for Cargo commands", true
+	default:
+		return "", false
+	}
+}
+
+func isYarnInstall(value string) bool {
+	if containsCommandSequence(value, "yarn install") {
+		return true
+	}
+	fields := strings.Fields(strings.ToLower(value))
+	for i, field := range fields {
+		if commandToken(field) != "yarn" {
+			continue
+		}
+		next := nextNonFlagToken(fields[i+1:])
+		if next == "" || next == "install" {
+			return true
+		}
+	}
+	return false
+}
+
+func nextNonFlagToken(fields []string) string {
+	for _, field := range fields {
+		token := commandToken(field)
+		if token == "" || strings.HasPrefix(token, "-") {
+			continue
+		}
+		return token
+	}
+	return ""
+}
+
+func isNodePackageInstall(value string) bool {
+	return containsCommandSequence(value, "npm ci") || containsCommandSequence(value, "npm install") || isYarnInstall(value) || containsCommandSequence(value, "pnpm install")
+}
+
+func stageSetsNodeEnvProduction(stage dockerfile.Stage) bool {
+	for _, instruction := range stage.Instructions {
+		if instruction.Opcode != "ENV" && instruction.Opcode != "ARG" {
+			continue
+		}
+		if strings.Contains(instruction.Value, "NODE_ENV=production") {
+			return true
+		}
+	}
+	return false
 }
 
 func finding(message string, instruction dockerfile.Instruction, stage int) Finding {

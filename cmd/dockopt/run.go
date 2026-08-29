@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,7 +13,9 @@ import (
 	"strings"
 
 	"github.com/davidgrldo/dockerfile-optimizer/internal/analyzer"
+	"github.com/davidgrldo/dockerfile-optimizer/internal/config"
 	"github.com/davidgrldo/dockerfile-optimizer/internal/dockerfile"
+	"github.com/davidgrldo/dockerfile-optimizer/internal/fix"
 	"github.com/davidgrldo/dockerfile-optimizer/internal/report"
 )
 
@@ -34,11 +37,26 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 	stackName := flags.String("stack", "", "override detected stack")
 	failOn := flags.String("fail-on", "error", "failure threshold: none, warn, or error")
 	ignoreRules := flags.String("ignore", "", "comma-separated rule IDs to suppress")
+	configPath := flags.String("config", "", "path to .dockopt.yml")
+	noConfig := flags.Bool("no-config", false, "ignore .dockopt.yml")
+	applyFix := flags.Bool("fix", false, "rewrite GEN002, GEN003, and GEN006 in place")
 	if err := flags.Parse(args); err != nil {
 		return writeFailure(stdout, stderr, jsonRequested, "usage_error", err)
 	}
+	setFlags := map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 	if *jsonMode && *sarifMode {
 		return writeFailure(stdout, stderr, false, "usage_error", errors.New("--json and --sarif are mutually exclusive"))
+	}
+	cfg, err := loadRuntimeConfig(*noConfig, *configPath)
+	if err != nil {
+		return writeFailure(stdout, stderr, *jsonMode, "usage_error", err)
+	}
+	if !setFlags["fail-on"] && cfg.FailOn != "" {
+		*failOn = cfg.FailOn
+	}
+	if !setFlags["stack"] && cfg.Stack != "" {
+		*stackName = cfg.Stack
 	}
 	paths, err := expandInputs(flags.Args())
 	if err != nil {
@@ -46,6 +64,13 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 	}
 	if len(paths) < 1 {
 		return writeFailure(stdout, stderr, *jsonMode, "usage_error", errors.New("expected at least one Dockerfile path"))
+	}
+	if *applyFix {
+		for _, path := range paths {
+			if path == "-" {
+				return writeFailure(stdout, stderr, *jsonMode, "usage_error", errors.New("--fix cannot read from stdin"))
+			}
+		}
 	}
 	for _, path := range paths {
 		if path != "-" && strings.HasPrefix(path, "-") {
@@ -58,12 +83,13 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 
 	var ignore []string
 	if *ignoreRules != "" {
-		var err error
-		ignore, err = parseIgnore(*ignoreRules)
+		parsed, err := parseIgnore(*ignoreRules)
 		if err != nil {
 			return writeFailure(stdout, stderr, *jsonMode, "usage_error", err)
 		}
+		ignore = append(ignore, parsed...)
 	}
+	ignore = append(ignore, cfg.Ignore...)
 
 	var override analyzer.Stack
 	if *stackName != "" {
@@ -76,11 +102,11 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 
 	multi := len(paths) > 1
 	if *sarifMode {
-		return analyzeSARIF(paths, stdout, stderr, override, *failOn, ignore, open)
+		return analyzeSARIF(paths, stdout, stderr, override, *failOn, ignore, *applyFix, open)
 	}
 	exit := 0
 	for _, path := range paths {
-		if code := analyzePath(path, stdout, stderr, *jsonMode, multi, override, *failOn, ignore, open); code > exit {
+		if code := analyzePath(path, stdout, stderr, *jsonMode, multi, override, *failOn, ignore, *applyFix, open); code > exit {
 			exit = code
 		}
 	}
@@ -90,8 +116,8 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 // analyzePath analyzes one Dockerfile and writes its result. It returns the
 // per-file exit contribution: 0 clean, 1 threshold reached, 2 could not analyze.
 // The caller keeps the maximum across all paths.
-func analyzePath(path string, stdout, stderr io.Writer, jsonMode, multi bool, override analyzer.Stack, failOn string, ignore []string, open func(string) (io.ReadCloser, error)) int {
-	result, kind, err := analyzeInput(path, override, ignore, open)
+func analyzePath(path string, stdout, stderr io.Writer, jsonMode, multi bool, override analyzer.Stack, failOn string, ignore []string, applyFix bool, open func(string) (io.ReadCloser, error)) int {
+	result, kind, err := analyzeInput(path, override, ignore, applyFix, open)
 	if err != nil {
 		return writeFailure(stdout, stderr, jsonMode, kind, err)
 	}
@@ -117,7 +143,7 @@ func analyzePath(path string, stdout, stderr io.Writer, jsonMode, multi bool, ov
 	return 0
 }
 
-func analyzeInput(path string, override analyzer.Stack, ignore []string, open func(string) (io.ReadCloser, error)) (analyzer.Result, string, error) {
+func analyzeInput(path string, override analyzer.Stack, ignore []string, applyFix bool, open func(string) (io.ReadCloser, error)) (analyzer.Result, string, error) {
 	file, err := open(path)
 	if err != nil {
 		return analyzer.Result{}, "input_error", err
@@ -136,19 +162,52 @@ func analyzeInput(path string, override analyzer.Stack, ignore []string, open fu
 	if closeErr != nil {
 		return analyzer.Result{}, "input_error", fmt.Errorf("close %s: %w", path, closeErr)
 	}
-	return analyzer.Analyze(doc, override, ignore...), "", nil
+	result := analyzer.Analyze(doc, override, ignore...)
+	if applyFix {
+		fixed, err := rewriteFile(path, result, override, ignore)
+		if err != nil {
+			return analyzer.Result{}, "output_error", err
+		}
+		result = fixed
+	}
+	return result, "", nil
 }
 
-func analyzeSARIF(paths []string, stdout, stderr io.Writer, override analyzer.Stack, failOn string, ignore []string, open func(string) (io.ReadCloser, error)) int {
+func rewriteFile(path string, result analyzer.Result, override analyzer.Stack, ignore []string) (analyzer.Result, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return analyzer.Result{}, err
+	}
+	out, err := fix.Apply(src, result.Findings)
+	if err != nil {
+		return analyzer.Result{}, err
+	}
+	if bytes.Equal(src, out) {
+		return result, nil
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return analyzer.Result{}, err
+	}
+	doc, err := dockerfile.Parse(path, bytes.NewReader(out))
+	if err != nil {
+		return analyzer.Result{}, err
+	}
+	return analyzer.Analyze(doc, override, ignore...), nil
+}
+
+func analyzeSARIF(paths []string, stdout, stderr io.Writer, override analyzer.Stack, failOn string, ignore []string, applyFix bool, open func(string) (io.ReadCloser, error)) int {
 	results := make([]analyzer.Result, 0, len(paths))
 	exit := 0
 	for _, path := range paths {
-		result, kind, err := analyzeInput(path, override, ignore, open)
+		result, kind, err := analyzeInput(path, override, ignore, applyFix, open)
 		if err != nil {
-			return writeFailure(stdout, stderr, false, kind, err)
+			if code := writeFailure(stdout, stderr, false, kind, err); code > exit {
+				exit = code
+			}
+			continue
 		}
 		results = append(results, result)
-		if meetsThreshold(result.Findings, failOn) {
+		if meetsThreshold(result.Findings, failOn) && exit < 1 {
 			exit = 1
 		}
 	}
@@ -178,7 +237,7 @@ func requestsJSON(args []string) bool {
 			if parsed, err := strconv.ParseBool(value); err == nil {
 				jsonMode = parsed
 			}
-		case "stack", "fail-on", "ignore":
+		case "stack", "fail-on", "ignore", "config":
 			if hasValue {
 				continue
 			}
@@ -186,6 +245,47 @@ func requestsJSON(args []string) bool {
 		}
 	}
 	return jsonMode
+}
+
+func loadRuntimeConfig(noConfig bool, explicit string) (config.Config, error) {
+	if noConfig {
+		return config.Config{}, nil
+	}
+	path := explicit
+	if path == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return config.Config{}, err
+		}
+		found, err := config.Find(cwd)
+		if err != nil {
+			return config.Config{}, err
+		}
+		if found == "" {
+			return config.Config{}, nil
+		}
+		path = found
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return config.Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
+	if cfg.FailOn != "" && cfg.FailOn != "none" && cfg.FailOn != "warn" && cfg.FailOn != "error" {
+		return config.Config{}, fmt.Errorf("invalid fail-on threshold %q", cfg.FailOn)
+	}
+	if cfg.Stack != "" {
+		if _, err := analyzer.ParseStack(cfg.Stack); err != nil {
+			return config.Config{}, fmt.Errorf("unknown stack %q", cfg.Stack)
+		}
+	}
+	if len(cfg.Ignore) > 0 {
+		ids, err := parseIgnore(strings.Join(cfg.Ignore, ","))
+		if err != nil {
+			return config.Config{}, err
+		}
+		cfg.Ignore = ids
+	}
+	return cfg, nil
 }
 
 func writeFailure(stdout, stderr io.Writer, jsonMode bool, kind string, err error) int {
