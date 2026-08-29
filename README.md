@@ -18,7 +18,7 @@ on comments, casing, or line continuations.
 
 ## Highlights
 
-- **🎯 Stack-aware** — detects Go, Java, Rust, .NET, PHP, and Ruby and runs targeted rules (plus generic checks for Python, Node.js, and C/C++).
+- **🎯 Stack-aware** — detects Go, Java, Rust, .NET, PHP, Ruby, Python, Node.js, and C/C++ and runs targeted rules.
 - **🧠 Real parser** — understands stages, continuations, heredocs, and JSON instructions instead of grepping raw lines.
 - **⚙️ Built for CI** — stable rule IDs, a configurable failure threshold, and precise exit codes.
 - **📦 Batch + streaming** — analyze many files in one run; JSON output is [JSON Lines](https://jsonlines.org/), ready for `jq`.
@@ -56,7 +56,7 @@ Stack-specific checks enabled.
 ## Usage
 
 ```text
-dockopt [--json] [--stack <name>] [--fail-on none|warn|error] <Dockerfile>...
+dockopt [--json] [--stack <name>] [--fail-on none|warn|error] [--ignore <id,id>] <Dockerfile>...
 ```
 
 Options must appear before the Dockerfile paths:
@@ -64,6 +64,7 @@ Options must appear before the Dockerfile paths:
 - `--json` writes the versioned JSON result instead of human-readable output.
 - `--stack <name>` overrides detection with a validated stack name (applied to every path).
 - `--fail-on none|warn|error` selects the failure threshold. The default is `error`.
+- `--ignore <id,id>` suppresses those rule IDs (case-insensitive) for every path.
 
 The threshold controls only the process status; findings below the threshold still appear in the output.
 
@@ -71,7 +72,10 @@ The threshold controls only the process status; findings below the threshold sti
 ./dockopt Dockerfile
 ./dockopt --json Dockerfile
 ./dockopt --stack go --fail-on warn Dockerfile
+./dockopt --ignore GEN001,GEN005 --fail-on warn Dockerfile
 ```
+
+A `# dockopt:disable GEN001,GEN005` comment on the line immediately before an instruction suppresses those rules for that instruction only (blank lines in between are fine).
 
 ### Multiple files
 
@@ -108,7 +112,7 @@ Analysis results are written to stdout. Operational diagnostics are written to s
 
 ## Stack support
 
-Go, Java, Rust, .NET, PHP, and Ruby have stack-specific rules. Python, Node.js, and C/C++ are detected but receive generic checks only.
+Go, Java, Rust, .NET, PHP, Ruby, Python, Node.js, and C/C++ have stack-specific rules.
 
 | Stack | Override | Stack-specific rules |
 | --- | --- | --- |
@@ -118,9 +122,9 @@ Go, Java, Rust, .NET, PHP, and Ruby have stack-specific rules. Python, Node.js, 
 | .NET | `dotnet` | ✅ |
 | PHP | `php` | ✅ |
 | Ruby | `ruby` | ✅ |
-| Python | `python` | ⬜ generic checks only |
-| Node.js | `node` | ⬜ generic checks only |
-| C/C++ | `c_cpp` | ⬜ generic checks only |
+| Python | `python` | ✅ |
+| Node.js | `node` | ✅ |
+| C/C++ | `c_cpp` | ✅ |
 
 Generic Dockerfile rules run for every stack.
 
@@ -131,10 +135,12 @@ Rule IDs are stable and safe to reference in CI (e.g. to gate on a subset).
 | ID | Severity | Applies to | Checks |
 | --- | --- | --- | --- |
 | `GEN001` | warn | all | Base image uses `:latest`, or is untagged (which defaults to `latest`). Stage references, `scratch`, and digest-pinned images are exempt. |
-| `GEN002` | warn | all | `apt-get install` without `--no-install-recommends`. |
+| `GEN002` | warn | all | `apt-get install` without `--no-install-recommends` (flags between `apt-get` and `install` are allowed). |
 | `GEN003` | warn | all | `apt-get install` without clearing `/var/lib/apt/lists` in the same `RUN`. |
 | `GEN004` | warn | all | `ADD <url>` instead of `RUN curl/wget` (with a checksum) or `COPY`. |
-| `GEN005` | warn | all | Final stage's effective `USER` is `root`. |
+| `GEN005` | warn | all | Final stage runs as root: explicit `USER root`/`0`, or no `USER` at all. Images whose name/tag contains `nonroot` are exempt when `USER` is omitted. |
+| `GEN006` | warn | all | `apk add` without `--no-cache`. |
+| `GEN007` | warn | all | `yum`/`dnf`/`microdnf install` without cleaning the package cache in the same `RUN`. |
 | `GO001` | warn | go | Single-stage Go build (multi-stage shrinks the image). |
 | `GO002` | error | go | `go build` for a `scratch` final image without `CGO_ENABLED=0` (checked on the `RUN` and on stage-level `ENV`/`ARG`). |
 | `GO003` | warn | go | `golang` image used as the final stage. |
@@ -144,8 +150,11 @@ Rule IDs are stable and safe to reference in CI (e.g. to gate on a subset).
 | `PHP001` | warn | php | `composer install` without `--no-dev`. |
 | `PHP002` | warn | php | `composer install` without `--optimize-autoloader`. |
 | `RUBY001` | info | ruby | `bundle install` without `--deployment`. |
+| `PY001` | warn | python | `pip install` without `--no-cache-dir`. |
+| `NODE001` | warn | node | `npm install` instead of `npm ci`. |
+| `CCPP001` | warn | c_cpp | Compiler image (`gcc`/`g++`) used as the final stage. |
 
-> **Known limits:** the `apt-get` rules match the common `apt-get install ...` form (not `apt-get -y install`, with the flag before the subcommand), and commands inside heredoc bodies are not analyzed.
+> **Known limits:** commands inside heredoc bodies are analyzed as flattened text (not a shell AST).
 
 ## JSON schema
 

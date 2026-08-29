@@ -2,6 +2,7 @@ package dockerfile
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,26 @@ func TestParseHeredocIsolation(t *testing.T) {
 	}
 	if got := doc.Stages[0].Instructions[0].Range; got != (Range{StartLine: 2, EndLine: 5}) {
 		t.Fatalf("range=%#v", got)
+	}
+	if !strings.Contains(doc.Stages[0].Instructions[0].Value, "go build ./...") {
+		t.Fatalf("heredoc body missing from RUN value: %#v", doc.Stages[0].Instructions[0].Value)
+	}
+}
+
+func TestParseDisableCommentAppliesToNextInstruction(t *testing.T) {
+	doc, err := Parse("Dockerfile", strings.NewReader("# dockopt:disable GEN001, GEN005\nFROM ubuntu:latest\nUSER root\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := doc.Instructions[0]
+	if from.Opcode != "FROM" {
+		t.Fatalf("instruction=%#v", from)
+	}
+	if !slices.Contains(from.Disabled, "GEN001") || !slices.Contains(from.Disabled, "GEN005") || len(from.Disabled) != 2 {
+		t.Fatalf("FROM Disabled=%v, want GEN001 and GEN005", from.Disabled)
+	}
+	if user := doc.Instructions[1]; len(user.Disabled) != 0 {
+		t.Fatalf("USER must not inherit disable: %#v", user)
 	}
 }
 

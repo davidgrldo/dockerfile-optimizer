@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.2.0] - 2026-08-29
+
+### Added
+
+- Stack-specific rules for Python (`PY001` pip `--no-cache-dir`), Node.js (`NODE001` prefer `npm ci`), and C/C++ (`CCPP001` compiler image as final stage).
+- Generic package-manager rules: `GEN006` (`apk add` without `--no-cache`) and `GEN007` (`yum`/`dnf`/`microdnf install` without cache cleanup).
+- Per-instruction `# dockopt:disable ID,ID` comments and a `--ignore ID,ID` flag to suppress findings.
+
+### Changed
+
+- `GEN005` now also flags a missing `USER` in the final stage (implicit root), except when the base image name/tag contains `nonroot`.
+- `apt-get` rules recognize flags between the command and subcommand (e.g. `apt-get -y install`).
+- Heredoc bodies are included in `RUN` analysis.
+
 ## [1.1.0] - 2026-08-29
 
 ### Fixed

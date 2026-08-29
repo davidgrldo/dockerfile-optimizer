@@ -39,6 +39,7 @@ func Parse(name string, r io.Reader) (*Document, error) {
 	start := 0
 	end := 0
 	continued := false
+	var pendingDisable []string
 
 	for next := 0; next < len(lines); {
 		line := lines[next]
@@ -52,6 +53,9 @@ func Parse(name string, r io.Reader) (*Document, error) {
 			if !continued {
 				if escape, ok := parseEscapeDirective(physical); ok {
 					doc.EscapeToken = escape
+				}
+				if ids, ok := parseDisableDirective(physical); ok {
+					pendingDisable = append(pendingDisable, ids...)
 				}
 			}
 			continue
@@ -74,7 +78,8 @@ func Parse(name string, r io.Reader) (*Document, error) {
 			continue
 		}
 		var err error
-		next, err = parseAndAdd(doc, logical, start, end, lines, next)
+		next, err = parseAndAdd(doc, logical, start, end, lines, next, pendingDisable)
+		pendingDisable = nil
 		if err != nil {
 			return nil, err
 		}
@@ -85,20 +90,30 @@ func Parse(name string, r io.Reader) (*Document, error) {
 	return doc, nil
 }
 
-func parseAndAdd(doc *Document, text string, start, end int, lines []physicalLine, next int) (int, error) {
+func parseAndAdd(doc *Document, text string, start, end int, lines []physicalLine, next int, disabled []string) (int, error) {
 	instruction, err := parseInstruction(doc.Name, text, start, end)
 	if err != nil {
 		return next, err
 	}
+	if len(disabled) > 0 {
+		instruction.Disabled = append([]string(nil), disabled...)
+	}
 	for _, delimiter := range heredocDelimiters(instruction.Value) {
 		found := false
+		var body []string
 		for next < len(lines) {
 			line := lines[next]
 			next++
 			if strings.TrimSpace(line.text) == delimiter {
 				instruction.Range.EndLine = line.number
+				if len(body) > 0 {
+					instruction.Value = strings.TrimSpace(instruction.Value + " " + strings.Join(body, " "))
+				}
 				found = true
 				break
+			}
+			if part := strings.TrimSpace(line.text); part != "" {
+				body = append(body, part)
 			}
 		}
 		if !found {
@@ -196,6 +211,28 @@ func parseFrom(value string) (base, name, platform string, err error) {
 		return "", "", "", errors.New("invalid FROM instruction")
 	}
 	return base, fields[1], platform, nil
+}
+
+func parseDisableDirective(line string) ([]string, bool) {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))
+	lower := strings.ToLower(trimmed)
+	const marker = "dockopt:disable"
+	if !strings.HasPrefix(lower, marker) {
+		return nil, false
+	}
+	rest := strings.TrimSpace(trimmed[len(marker):])
+	rest = strings.TrimSpace(strings.TrimPrefix(rest, "="))
+	if rest == "" {
+		return nil, true
+	}
+	var ids []string
+	for _, part := range strings.Split(rest, ",") {
+		id := strings.ToUpper(strings.TrimSpace(part))
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, true
 }
 
 func parseEscapeDirective(line string) (rune, bool) {

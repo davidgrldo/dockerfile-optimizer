@@ -72,13 +72,13 @@ func TestStackValidationAndSupport(t *testing.T) {
 		StackGeneric: false,
 		StackGo:      true,
 		StackJava:    true,
-		StackPython:  false,
-		StackNode:    false,
+		StackPython:  true,
+		StackNode:    true,
 		StackRust:    true,
 		StackDotNet:  true,
 		StackPHP:     true,
 		StackRuby:    true,
-		StackCCPP:    false,
+		StackCCPP:    true,
 	}
 	for stack, supported := range want {
 		if got := IsSupported(stack); got != supported {
@@ -89,16 +89,16 @@ func TestStackValidationAndSupport(t *testing.T) {
 
 func TestStackRuleIDsComeFromRegisteredRules(t *testing.T) {
 	want := map[Stack][]string{
-		StackGeneric: {"GEN001", "GEN002", "GEN003", "GEN004", "GEN005"},
+		StackGeneric: {"GEN001", "GEN002", "GEN003", "GEN004", "GEN005", "GEN006", "GEN007"},
 		StackGo:      {"GO001", "GO002", "GO003"},
 		StackJava:    {"JAVA001"},
-		StackPython:  {},
-		StackNode:    {},
+		StackPython:  {"PY001"},
+		StackNode:    {"NODE001"},
 		StackRust:    {"RUST001"},
 		StackDotNet:  {"DOTNET001"},
 		StackPHP:     {"PHP001", "PHP002"},
 		StackRuby:    {"RUBY001"},
-		StackCCPP:    {},
+		StackCCPP:    {"CCPP001"},
 	}
 	for stack, ids := range want {
 		if got := stackRuleIDs(stack); !reflect.DeepEqual(got, ids) {

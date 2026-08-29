@@ -5,4 +5,5 @@ COPY . .
 RUN go build -o /app ./cmd/app
 FROM scratch
 COPY --from=build /app /app
+USER 65532
 ENTRYPOINT ["/app"]

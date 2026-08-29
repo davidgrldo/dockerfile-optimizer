@@ -48,7 +48,22 @@ func TestProductionRuleRegistry(t *testing.T) {
 		{"add local archive not flagged", "FROM alpine:3.20\nCOPY app /app\nADD local.tar /app\n", StackGeneric, nil, []string{"GEN004"}},
 		{"final user root flagged", "FROM alpine:3.20\nUSER root\n", StackGeneric, []string{"GEN005"}, nil},
 		{"final user nonroot not flagged", "FROM alpine:3.20\nUSER app\n", StackGeneric, nil, []string{"GEN005"}},
-		{"root only in build stage not flagged", "FROM golang:1.24 AS build\nUSER root\nRUN CGO_ENABLED=0 go build\nFROM scratch\nCOPY --from=build /app /app\n", StackGo, nil, []string{"GEN005"}},
+		{"missing USER flagged as root", "FROM alpine:3.20\nRUN true\n", StackGeneric, []string{"GEN005"}, nil},
+		{"nonroot base image not flagged", "FROM gcr.io/distroless/static:nonroot\nCOPY app /app\n", StackGeneric, nil, []string{"GEN005"}},
+		{"root only in build stage not flagged", "FROM golang:1.24 AS build\nUSER root\nRUN CGO_ENABLED=0 go build\nFROM scratch\nCOPY --from=build /app /app\nUSER 65532\n", StackGo, nil, []string{"GEN005"}},
+		{"apt-get flags before install", "FROM debian:bookworm\nRUN apt-get -y install curl && rm -rf /var/lib/apt/lists/*\n", StackGeneric, []string{"GEN002"}, []string{"GEN003"}},
+		{"apt-get in heredoc body", "FROM debian:bookworm\nRUN <<EOF\napt-get install -y curl\nrm -rf /var/lib/apt/lists/*\nEOF\n", StackGeneric, []string{"GEN002"}, []string{"GEN003"}},
+		{"apk add without no-cache", "FROM alpine:3.20\nRUN apk add curl\nUSER app\n", StackGeneric, []string{"GEN006"}, nil},
+		{"apk add with no-cache", "FROM alpine:3.20\nRUN apk add --no-cache curl\nUSER app\n", StackGeneric, nil, []string{"GEN006"}},
+		{"dnf install without clean", "FROM fedora:41\nRUN dnf install -y curl\nUSER app\n", StackGeneric, []string{"GEN007"}, nil},
+		{"dnf install with clean", "FROM fedora:41\nRUN dnf install -y curl && dnf clean all\nUSER app\n", StackGeneric, nil, []string{"GEN007"}},
+		{"pip without no-cache-dir", "FROM python:3.12-slim\nRUN pip install flask\nUSER app\n", StackPython, []string{"PY001"}, nil},
+		{"pip with no-cache-dir", "FROM python:3.12-slim\nRUN pip install --no-cache-dir flask\nUSER app\n", StackPython, nil, []string{"PY001"}},
+		{"npm install not ci", "FROM node:22-alpine\nRUN npm install\nUSER node\n", StackNode, []string{"NODE001"}, nil},
+		{"npm ci not flagged", "FROM node:22-alpine\nRUN npm ci\nUSER node\n", StackNode, nil, []string{"NODE001"}},
+		{"gcc final image", "FROM gcc:14\nRUN make\nUSER app\n", StackCCPP, []string{"CCPP001"}, nil},
+		{"gcc builder with runtime final", "FROM gcc:14 AS build\nRUN make\nFROM alpine:3.20\nCOPY --from=build /app /app\nUSER app\n", StackCCPP, nil, []string{"CCPP001"}},
+		{"disable comment suppresses latest", "# dockopt:disable GEN001\nFROM ubuntu:latest\nUSER app\n", StackGeneric, nil, []string{"GEN001"}},
 		{"Rust single stage", "FROM rust:1.88\n", StackRust, []string{"RUST001"}, nil},
 		{"dotnet untagged", "FROM mcr.microsoft.com/dotnet/runtime\n", StackDotNet, []string{"DOTNET001"}, nil},
 		{"dotnet latest handled generically", "FROM mcr.microsoft.com/dotnet/runtime:latest\n", StackDotNet, []string{"GEN001"}, []string{"DOTNET001"}},
@@ -126,8 +141,17 @@ func TestGoFindingRangesAndStages(t *testing.T) {
 	}
 }
 
+func TestAnalyzeIgnoresRuleIDsFromArgument(t *testing.T) {
+	result := Analyze(parseTestDocument(t, "FROM ubuntu:latest\nUSER app\n"), StackGeneric, "GEN001")
+	for _, finding := range result.Findings {
+		if finding.ID == "GEN001" {
+			t.Fatalf("GEN001 should be ignored: %#v", result.Findings)
+		}
+	}
+}
+
 func TestAnalyzeGenericRunsOnlyGenericRulesAndIsUnsupported(t *testing.T) {
-	result := Analyze(parseTestDocument(t, "FROM alpine:latest\n"), StackGeneric)
+	result := Analyze(parseTestDocument(t, "FROM alpine:latest\nUSER app\n"), StackGeneric)
 	if result.Supported {
 		t.Fatal("generic analysis must not claim stack-specific support")
 	}
@@ -137,13 +161,15 @@ func TestAnalyzeGenericRunsOnlyGenericRulesAndIsUnsupported(t *testing.T) {
 }
 
 func TestRuleRegistryMetadata(t *testing.T) {
-	wantIDs := []string{"DOTNET001", "GEN001", "GEN002", "GEN003", "GEN004", "GEN005", "GO001", "GO002", "GO003", "JAVA001", "PHP001", "PHP002", "RUBY001", "RUST001"}
+	wantIDs := []string{"CCPP001", "DOTNET001", "GEN001", "GEN002", "GEN003", "GEN004", "GEN005", "GEN006", "GEN007", "GO001", "GO002", "GO003", "JAVA001", "NODE001", "PHP001", "PHP002", "PY001", "RUBY001", "RUST001"}
 	wantSeverity := map[string]Severity{
 		"GEN001":    SeverityWarn,
 		"GEN002":    SeverityWarn,
 		"GEN003":    SeverityWarn,
 		"GEN004":    SeverityWarn,
 		"GEN005":    SeverityWarn,
+		"GEN006":    SeverityWarn,
+		"GEN007":    SeverityWarn,
 		"GO001":     SeverityWarn,
 		"GO002":     SeverityError,
 		"GO003":     SeverityWarn,
@@ -153,6 +179,9 @@ func TestRuleRegistryMetadata(t *testing.T) {
 		"PHP001":    SeverityWarn,
 		"PHP002":    SeverityWarn,
 		"RUBY001":   SeverityInfo,
+		"PY001":     SeverityWarn,
+		"NODE001":   SeverityWarn,
+		"CCPP001":   SeverityWarn,
 	}
 
 	gotIDs := make([]string, 0, len(registeredRules))

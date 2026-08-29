@@ -40,7 +40,9 @@ jobs:
             printf '%s: %s\n' "$fixture" "$json"
             grep -Fq '"findings":[]' <<<"$json"
           done
-          ./dockopt --json testdata/dockerfiles/unsupported-python.Dockerfile
+          ./dockopt --json testdata/dockerfiles/unsupported-python.Dockerfile >/tmp/python.json
+          grep -Fq 'PY001' /tmp/python.json
+          ./dockopt --json --ignore GEN001,GEN005 testdata/dockerfiles/warn-latest.Dockerfile | grep -Fq '"findings":[]'
 
           set +e
           ./dockopt --json testdata/dockerfiles/error-go-static.Dockerfile >/tmp/error.json
