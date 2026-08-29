@@ -2,7 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
-## [1.0.0] - Unreleased
+## [1.1.0] - 2026-08-29
+
+### Fixed
+
+- `GO002` no longer reports a false error when `CGO_ENABLED=0` is set via a stage-level `ENV`/`ARG` instead of inline in the `RUN`.
+- Bash here-strings (`<<<`) are no longer misparsed as heredocs (previously a hard parse error).
+- `GEN001` now also flags untagged base images (implicit `:latest`), while exempting `scratch`, digest-pinned images, and prior stage references.
+
+### Added
+
+- New generic rules: `GEN002` (`apt-get install` without `--no-install-recommends`), `GEN003` (`apt-get install` without clearing the apt cache in the same `RUN`), `GEN004` (`ADD <url>`), and `GEN005` (final stage running as `root`).
+- Multi-file input: analyze several Dockerfiles in one run. JSON output is emitted as JSON Lines; single-file output is unchanged. The exit code is the most severe outcome across all paths.
+
+### Changed
+
+- `JAVA001` now covers all JDK versions and the `openjdk`, `eclipse-temurin`, and `amazoncorretto` repositories instead of only the exact tag `openjdk:17`.
+- Internal analyzer cleanup with no behavior change: removed the unused rule `Context`, collapsed the single-implementation `Rule` interface, and stack detection now runs once per invocation.
+
+## [1.0.0] - 2026-07-16
 
 ### Added
 
