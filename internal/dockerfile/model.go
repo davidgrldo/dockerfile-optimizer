@@ -7,6 +7,7 @@ type Instruction struct {
 	Opcode, Original, Value string
 	JSON                    bool
 	Range                   Range
+	Disabled                []string
 }
 type Stage struct {
 	Index                     int

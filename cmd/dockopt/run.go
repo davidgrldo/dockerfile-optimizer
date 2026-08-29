@@ -27,6 +27,7 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 	jsonMode := flags.Bool("json", false, "output results as JSON")
 	stackName := flags.String("stack", "", "override detected stack")
 	failOn := flags.String("fail-on", "error", "failure threshold: none, warn, or error")
+	ignoreRules := flags.String("ignore", "", "comma-separated rule IDs to suppress")
 	if err := flags.Parse(args); err != nil {
 		return writeFailure(stdout, stderr, jsonRequested, "usage_error", err)
 	}
@@ -43,6 +44,15 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 		return writeFailure(stdout, stderr, *jsonMode, "usage_error", fmt.Errorf("invalid fail-on threshold %q", *failOn))
 	}
 
+	var ignore []string
+	if *ignoreRules != "" {
+		var err error
+		ignore, err = parseIgnore(*ignoreRules)
+		if err != nil {
+			return writeFailure(stdout, stderr, *jsonMode, "usage_error", err)
+		}
+	}
+
 	var override analyzer.Stack
 	if *stackName != "" {
 		var err error
@@ -55,7 +65,7 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 	multi := len(paths) > 1
 	exit := 0
 	for _, path := range paths {
-		if code := analyzePath(path, stdout, stderr, *jsonMode, multi, override, *failOn, open); code > exit {
+		if code := analyzePath(path, stdout, stderr, *jsonMode, multi, override, *failOn, ignore, open); code > exit {
 			exit = code
 		}
 	}
@@ -65,7 +75,7 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 // analyzePath analyzes one Dockerfile and writes its result. It returns the
 // per-file exit contribution: 0 clean, 1 threshold reached, 2 could not analyze.
 // The caller keeps the maximum across all paths.
-func analyzePath(path string, stdout, stderr io.Writer, jsonMode, multi bool, override analyzer.Stack, failOn string, open func(string) (io.ReadCloser, error)) int {
+func analyzePath(path string, stdout, stderr io.Writer, jsonMode, multi bool, override analyzer.Stack, failOn string, ignore []string, open func(string) (io.ReadCloser, error)) int {
 	file, err := open(path)
 	if err != nil {
 		return writeFailure(stdout, stderr, jsonMode, "input_error", err)
@@ -84,7 +94,7 @@ func analyzePath(path string, stdout, stderr io.Writer, jsonMode, multi bool, ov
 	if closeErr != nil {
 		return writeFailure(stdout, stderr, jsonMode, "input_error", fmt.Errorf("close %s: %w", path, closeErr))
 	}
-	result := analyzer.Analyze(doc, override)
+	result := analyzer.Analyze(doc, override, ignore...)
 
 	if jsonMode {
 		err = report.WriteJSON(stdout, result)
@@ -126,7 +136,7 @@ func requestsJSON(args []string) bool {
 			if parsed, err := strconv.ParseBool(value); err == nil {
 				jsonMode = parsed
 			}
-		case "stack", "fail-on":
+		case "stack", "fail-on", "ignore":
 			if hasValue {
 				continue
 			}
@@ -155,4 +165,19 @@ func meetsThreshold(findings []analyzer.Finding, threshold string) bool {
 		}
 	}
 	return false
+}
+
+func parseIgnore(value string) ([]string, error) {
+	var ids []string
+	for _, part := range strings.Split(value, ",") {
+		id := strings.ToUpper(strings.TrimSpace(part))
+		if id == "" {
+			continue
+		}
+		if !analyzer.KnownRuleID(id) {
+			return nil, fmt.Errorf("unknown rule %q", id)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }

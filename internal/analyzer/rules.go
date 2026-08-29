@@ -37,6 +37,8 @@ var registeredRules = []rule{
 	{"GEN003", SeverityWarn, []Stack{StackGeneric}, checkAptCacheCleanup},
 	{"GEN004", SeverityWarn, []Stack{StackGeneric}, checkAddRemoteURL},
 	{"GEN005", SeverityWarn, []Stack{StackGeneric}, checkFinalUserRoot},
+	{"GEN006", SeverityWarn, []Stack{StackGeneric}, checkApkNoCache},
+	{"GEN007", SeverityWarn, []Stack{StackGeneric}, checkRpmCacheCleanup},
 	{"GO001", SeverityWarn, []Stack{StackGo}, checkGoMultistage},
 	{"GO002", SeverityError, []Stack{StackGo}, checkGoStaticBuild},
 	{"GO003", SeverityWarn, []Stack{StackGo}, checkGoFinalImage},
@@ -46,6 +48,9 @@ var registeredRules = []rule{
 	{"PHP001", SeverityWarn, []Stack{StackPHP}, checkComposerFlag("--no-dev", "Use 'composer install --no-dev' for production PHP builds")},
 	{"PHP002", SeverityWarn, []Stack{StackPHP}, checkComposerFlag("--optimize-autoloader", "Use 'composer install --optimize-autoloader' for production PHP builds")},
 	{"RUBY001", SeverityInfo, []Stack{StackRuby}, checkRubyDeployment},
+	{"PY001", SeverityWarn, []Stack{StackPython}, checkPipNoCache},
+	{"NODE001", SeverityWarn, []Stack{StackNode}, checkNpmCi},
+	{"CCPP001", SeverityWarn, []Stack{StackCCPP}, checkCCPPFinalImage},
 }
 
 func checkLatestBase(doc *dockerfile.Document) []Finding {
@@ -135,7 +140,10 @@ func checkFinalUserRoot(doc *dockerfile.Document) []Finding {
 		}
 	}
 	if lastUser == nil {
-		return nil
+		if isNonRootBaseImage(stage.BaseImage) {
+			return nil
+		}
+		return []Finding{finding("Final stage has no USER; the image will run as root", stage.From, stage.Index)}
 	}
 	fields := strings.Fields(lastUser.Value)
 	if len(fields) == 0 {
@@ -277,6 +285,96 @@ func checkRubyDeployment(doc *dockerfile.Document) []Finding {
 		}
 	}
 	return findings
+}
+
+func checkApkNoCache(doc *dockerfile.Document) []Finding {
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		for _, instruction := range stage.Instructions {
+			if instruction.Opcode == "RUN" && containsCommandSequence(instruction.Value, "apk add") && !hasToken(instruction.Value, "--no-cache") {
+				findings = append(findings, finding("Add '--no-cache' to 'apk add' to avoid storing the apk index in the layer", instruction, stage.Index))
+			}
+		}
+	}
+	return findings
+}
+
+func checkRpmCacheCleanup(doc *dockerfile.Document) []Finding {
+	var findings []Finding
+	managers := []struct {
+		install string
+		clean   string
+		cache   string
+		name    string
+	}{
+		{"yum install", "yum clean", "/var/cache/yum", "yum"},
+		{"dnf install", "dnf clean", "/var/cache/dnf", "dnf"},
+		{"microdnf install", "microdnf clean", "/var/cache/dnf", "microdnf"},
+	}
+	for _, stage := range doc.Stages {
+		for _, instruction := range stage.Instructions {
+			if instruction.Opcode != "RUN" {
+				continue
+			}
+			for _, manager := range managers {
+				if !containsCommandSequence(instruction.Value, manager.install) {
+					continue
+				}
+				if containsCommandSequence(instruction.Value, manager.clean) || strings.Contains(instruction.Value, manager.cache) {
+					continue
+				}
+				findings = append(findings, finding("Clean the "+manager.name+" cache in the same RUN (e.g. '"+manager.name+" clean all') to keep the layer small", instruction, stage.Index))
+			}
+		}
+	}
+	return findings
+}
+
+func checkPipNoCache(doc *dockerfile.Document) []Finding {
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		for _, instruction := range stage.Instructions {
+			if instruction.Opcode != "RUN" {
+				continue
+			}
+			if !containsCommandSequence(instruction.Value, "pip install") && !containsCommandSequence(instruction.Value, "pip3 install") {
+				continue
+			}
+			if hasToken(instruction.Value, "--no-cache-dir") {
+				continue
+			}
+			findings = append(findings, finding("Add '--no-cache-dir' to 'pip install' to keep pip caches out of the image", instruction, stage.Index))
+		}
+	}
+	return findings
+}
+
+func checkNpmCi(doc *dockerfile.Document) []Finding {
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		for _, instruction := range stage.Instructions {
+			if instruction.Opcode == "RUN" && containsCommandSequence(instruction.Value, "npm install") && !containsCommandSequence(instruction.Value, "npm ci") {
+				findings = append(findings, finding("Prefer 'npm ci' over 'npm install' for reproducible production installs", instruction, stage.Index))
+			}
+		}
+	}
+	return findings
+}
+
+func checkCCPPFinalImage(doc *dockerfile.Document) []Finding {
+	if len(doc.Stages) == 0 {
+		return nil
+	}
+	stage := doc.Stages[len(doc.Stages)-1]
+	repo := imageRepository(stage.BaseImage)
+	if repo != "gcc" && repo != "g++" {
+		return nil
+	}
+	return []Finding{finding("Avoid using a compiler image in the final stage; copy the binary to a slim runtime", stage.From, stage.Index)}
+}
+
+func isNonRootBaseImage(image string) bool {
+	return strings.Contains(strings.ToLower(image), "nonroot")
 }
 
 func finding(message string, instruction dockerfile.Instruction, stage int) Finding {

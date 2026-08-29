@@ -173,9 +173,27 @@ func TestRunRejectsUnknownStack(t *testing.T) {
 	}
 }
 
-func TestRunUnsupportedStackDoesNotClaimClean(t *testing.T) {
+func TestRunIgnoreFlagSuppressesFindings(t *testing.T) {
+	path := fixturePath("warn-latest")
+	if _, _, code := runWithBuffers("--fail-on", "warn", path); code != 1 {
+		t.Fatalf("baseline warn-latest should fail under --fail-on warn")
+	}
+	stdout, stderr, code := runWithBuffers("--ignore", "GEN001,GEN005", "--fail-on", "warn", path)
+	if code != 0 || stderr != "" || strings.Contains(stdout, "GEN001") || strings.Contains(stdout, "GEN005") {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestRunRejectsUnknownIgnoreID(t *testing.T) {
+	_, stderr, code := runWithBuffers("--ignore", "NOPE001", fixturePath("clean"))
+	if code != 2 || !strings.Contains(stderr, "unknown rule") {
+		t.Fatalf("code=%d, stderr=%q", code, stderr)
+	}
+}
+
+func TestRunPythonStackSpecificChecks(t *testing.T) {
 	stdout, stderr, code := runWithBuffers(fixturePath("unsupported-python"))
-	if code != 0 || !strings.Contains(stdout, "generic checks only") || strings.Contains(stdout, "No issues found") {
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "Stack-specific checks enabled") || !strings.Contains(stdout, "PY001") {
 		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
 	}
 }
@@ -290,6 +308,7 @@ func TestRequestsJSONStopsAtPathOrFlagTerminator(t *testing.T) {
 		{name: "after path", args: []string{"Dockerfile", "--json"}, want: false},
 		{name: "after terminator", args: []string{"--", "--json"}, want: false},
 		{name: "after invalid flag", args: []string{"--bogus", "--json", "Dockerfile"}, want: true},
+		{name: "after ignore value", args: []string{"--ignore", "GEN001", "--json"}, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := requestsJSON(test.args); got != test.want {

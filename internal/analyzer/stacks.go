@@ -138,18 +138,32 @@ func containsAny(values, candidates []string) bool {
 func containsCommandSequence(value, sequence string) bool {
 	fields := strings.Fields(strings.ToLower(value))
 	want := strings.Fields(sequence)
-	for start := 0; start+len(want) <= len(fields); start++ {
-		matched := true
-		for offset := range want {
-			token := strings.Trim(fields[start+offset], ";&|(){}'\"")
-			if token != want[offset] {
-				matched = false
-				break
-			}
+	if len(want) == 0 {
+		return false
+	}
+	for start := 0; start < len(fields); start++ {
+		if commandToken(fields[start]) != want[0] {
+			continue
 		}
-		if matched {
+		matched := 1
+		for i := start + 1; i < len(fields) && matched < len(want); i++ {
+			token := commandToken(fields[i])
+			if token == want[matched] {
+				matched++
+				continue
+			}
+			if strings.HasPrefix(token, "-") {
+				continue
+			}
+			break
+		}
+		if matched == len(want) {
 			return true
 		}
 	}
 	return false
+}
+
+func commandToken(field string) string {
+	return strings.Trim(field, ";&|(){}'\"")
 }
