@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,8 +23,38 @@ func TestRunCleanJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
 		t.Fatalf("decode output %q: %v", stdout, err)
 	}
-	if output.SchemaVersion != "1" || output.Findings == nil || len(output.Findings) != 0 {
+	if output.SchemaVersion != "2" || output.Findings == nil || len(output.Findings) != 0 {
 		t.Fatalf("output=%#v", output)
+	}
+}
+
+func TestRunSARIFAggregatesDirectory(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"Dockerfile.api": "FROM ubuntu:latest\nUSER app\n",
+		"Dockerfile.web": "FROM alpine:3.20\nUSER app\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stdout, stderr, code := runWithBuffers("--sarif", dir)
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var output report.SARIFLog
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode SARIF %q: %v", stdout, err)
+	}
+	if len(output.Runs) != 1 || len(output.Runs[0].Results) != 1 || output.Runs[0].Results[0].RuleID != "GEN001" {
+		t.Fatalf("output=%#v", output)
+	}
+}
+
+func TestRunRejectsJSONAndSARIFTogether(t *testing.T) {
+	_, stderr, code := runWithBuffers("--json", "--sarif", fixturePath("clean"))
+	if code != 2 || !strings.Contains(stderr, "mutually exclusive") {
+		t.Fatalf("code=%d, stderr=%q", code, stderr)
 	}
 }
 
@@ -327,8 +358,41 @@ func TestRunDirectoryReadErrorUsesJSONInputError(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
 		t.Fatalf("decode output %q: %v", stdout, err)
 	}
-	if output.Error.Kind != "input_error" {
+	if output.Error.Kind != "input_error" || !strings.Contains(output.Error.Message, "no Dockerfiles") {
 		t.Fatalf("output=%#v", output)
+	}
+}
+
+func TestRunDirectoryDiscoversDockerfiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(path, []byte("FROM alpine:3.20\nUSER app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := runWithBuffers("--json", dir)
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var output report.Output
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode %q: %v", stdout, err)
+	}
+	if output.Source != path {
+		t.Fatalf("source=%q want %q", output.Source, path)
+	}
+}
+
+func TestRunStdinDash(t *testing.T) {
+	reader := io.NopCloser(strings.NewReader("FROM alpine:3.20\nUSER app\n"))
+	var stdout, stderr bytes.Buffer
+	code := runWithOpener([]string{"--json", "-"}, &stdout, &stderr, func(path string) (io.ReadCloser, error) {
+		if path != "-" {
+			t.Fatalf("path=%q", path)
+		}
+		return reader, nil
+	})
+	if code != 0 || stderr.String() != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 

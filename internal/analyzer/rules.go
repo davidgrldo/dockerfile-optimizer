@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -13,6 +14,7 @@ type ruleCheck func(*dockerfile.Document) []Finding
 var (
 	goBuildPattern     = regexp.MustCompile(`(?:^|[^A-Za-z0-9_])go[[:space:]]+build(?:$|[^A-Za-z0-9_])`)
 	cgoDisabledPattern = regexp.MustCompile(`(?:^|[^A-Za-z0-9_])CGO_ENABLED[[:space:]]*=[[:space:]]*0(?:$|[^A-Za-z0-9_])`)
+	secretKeyPattern   = regexp.MustCompile(`(?i)(^|[_-])(password|secret|token|api[_-]?key|private[_-]?key)([_-]|$)`)
 )
 
 type rule struct {
@@ -39,6 +41,7 @@ var registeredRules = []rule{
 	{"GEN005", SeverityWarn, []Stack{StackGeneric}, checkFinalUserRoot},
 	{"GEN006", SeverityWarn, []Stack{StackGeneric}, checkApkNoCache},
 	{"GEN007", SeverityWarn, []Stack{StackGeneric}, checkRpmCacheCleanup},
+	{"GEN008", SeverityWarn, []Stack{StackGeneric}, checkSecretBuildArgs},
 	{"GO001", SeverityWarn, []Stack{StackGo}, checkGoMultistage},
 	{"GO002", SeverityError, []Stack{StackGo}, checkGoStaticBuild},
 	{"GO003", SeverityWarn, []Stack{StackGo}, checkGoFinalImage},
@@ -49,7 +52,9 @@ var registeredRules = []rule{
 	{"PHP002", SeverityWarn, []Stack{StackPHP}, checkComposerFlag("--optimize-autoloader", "Use 'composer install --optimize-autoloader' for production PHP builds")},
 	{"RUBY001", SeverityInfo, []Stack{StackRuby}, checkRubyDeployment},
 	{"PY001", SeverityWarn, []Stack{StackPython}, checkPipNoCache},
+	{"PY002", SeverityWarn, []Stack{StackPython}, checkPipCopyOrder},
 	{"NODE001", SeverityWarn, []Stack{StackNode}, checkNpmCi},
+	{"NODE002", SeverityWarn, []Stack{StackNode}, checkNpmCopyOrder},
 	{"CCPP001", SeverityWarn, []Stack{StackCCPP}, checkCCPPFinalImage},
 }
 
@@ -213,13 +218,14 @@ var (
 )
 
 func checkJavaRuntime(doc *dockerfile.Document) []Finding {
-	var findings []Finding
-	for _, stage := range doc.Stages {
-		if isFatJavaImage(strings.ToLower(stage.BaseImage)) {
-			findings = append(findings, finding("Use a slim or JRE Java base image (e.g. '-slim' or '-jre') to reduce image size", stage.From, stage.Index))
-		}
+	if len(doc.Stages) == 0 {
+		return nil
 	}
-	return findings
+	stage := doc.Stages[len(doc.Stages)-1]
+	if isFatJavaImage(strings.ToLower(stage.BaseImage)) {
+		return []Finding{finding("Use a slim or JRE Java base image (e.g. '-slim' or '-jre') to reduce image size", stage.From, stage.Index)}
+	}
+	return nil
 }
 
 // isFatJavaImage reports whether a (lowercased) base image is a full JDK image
@@ -359,6 +365,125 @@ func checkNpmCi(doc *dockerfile.Document) []Finding {
 		}
 	}
 	return findings
+}
+
+func checkPipCopyOrder(doc *dockerfile.Document) []Finding {
+	return checkInstallCopyOrder(doc, []string{"requirements.txt"}, func(value string) bool {
+		return containsCommandSequence(value, "pip install") || containsCommandSequence(value, "pip3 install")
+	}, "Copy the requirements file before COPY . so dependency layers stay cached")
+}
+
+func checkNpmCopyOrder(doc *dockerfile.Document) []Finding {
+	return checkInstallCopyOrder(doc, []string{"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json"}, func(value string) bool {
+		return containsCommandSequence(value, "npm install") || containsCommandSequence(value, "npm ci") || containsCommandSequence(value, "yarn")
+	}, "Copy package.json and the lockfile before COPY . so dependency layers stay cached")
+}
+
+func checkInstallCopyOrder(doc *dockerfile.Document, lockFiles []string, isInstall func(string) bool, message string) []Finding {
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		seenLock := false
+		var broad *dockerfile.Instruction
+		for _, instruction := range stage.Instructions {
+			switch instruction.Opcode {
+			case "COPY":
+				if copyUsesStage(instruction.Value) {
+					continue
+				}
+				sources := copySources(instruction.Value)
+				if copyIncludes(sources, lockFiles) {
+					seenLock = true
+				}
+				if isBroadContextCopy(sources) && !seenLock {
+					inst := instruction
+					broad = &inst
+				}
+			case "RUN":
+				if isInstall(instruction.Value) && broad != nil {
+					findings = append(findings, finding(message, *broad, stage.Index))
+					broad = nil
+				}
+			}
+		}
+	}
+	return findings
+}
+
+func copyUsesStage(value string) bool {
+	for _, field := range strings.Fields(value) {
+		if strings.HasPrefix(strings.ToLower(field), "--from=") {
+			return true
+		}
+	}
+	return false
+}
+
+func checkSecretBuildArgs(doc *dockerfile.Document) []Finding {
+	var findings []Finding
+	for _, stage := range doc.Stages {
+		for _, instruction := range stage.Instructions {
+			if instruction.Opcode != "ARG" && instruction.Opcode != "ENV" {
+				continue
+			}
+			for _, key := range assignmentKeys(instruction.Value) {
+				if secretKeyPattern.MatchString(key) {
+					findings = append(findings, finding("Do not pass secrets via ARG/ENV; use a secret mount or build-time secret", instruction, stage.Index))
+					break
+				}
+			}
+		}
+	}
+	return findings
+}
+
+func copySources(value string) []string {
+	fields := strings.Fields(value)
+	var parts []string
+	for _, field := range fields {
+		if strings.HasPrefix(field, "--") {
+			continue
+		}
+		parts = append(parts, strings.Trim(field, `"'`))
+	}
+	if len(parts) < 2 {
+		return nil
+	}
+	return parts[:len(parts)-1]
+}
+
+func isBroadContextCopy(sources []string) bool {
+	for _, source := range sources {
+		if source == "." || source == "./" {
+			return true
+		}
+	}
+	return false
+}
+
+func copyIncludes(sources, names []string) bool {
+	for _, source := range sources {
+		base := strings.ToLower(filepath.Base(source))
+		for _, name := range names {
+			if base == name {
+				return true
+			}
+			if name == "requirements.txt" && strings.HasPrefix(base, "requirements") && strings.HasSuffix(base, ".txt") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func assignmentKeys(value string) []string {
+	var keys []string
+	for _, field := range strings.Fields(value) {
+		key, _, _ := strings.Cut(field, "=")
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 func checkCCPPFinalImage(doc *dockerfile.Document) []Finding {

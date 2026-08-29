@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,7 +12,7 @@ import (
 	"github.com/davidgrldo/dockerfile-optimizer/internal/dockerfile"
 )
 
-func TestWriteJSONV1EmptyArray(t *testing.T) {
+func TestWriteJSONV2EmptyArray(t *testing.T) {
 	result := analyzer.Result{
 		Source:        "Dockerfile",
 		DetectedStack: analyzer.StackPython,
@@ -27,7 +28,7 @@ func TestWriteJSONV1EmptyArray(t *testing.T) {
 	if err := json.Unmarshal(buffer.Bytes(), &output); err != nil {
 		t.Fatal(err)
 	}
-	if output.SchemaVersion != "1" || output.Findings == nil {
+	if output.SchemaVersion != "2" || output.Findings == nil {
 		t.Fatalf("output=%#v", output)
 	}
 }
@@ -41,7 +42,7 @@ func TestNewOutputMapsResultAndCountsSeverities(t *testing.T) {
 		Supported:     true,
 		Findings: []analyzer.Finding{
 			{ID: "one", Severity: analyzer.SeverityInfo, Message: "info", Range: dockerfile.Range{StartLine: 2, EndLine: 2}},
-			{ID: "two", Severity: analyzer.SeverityWarn, Message: "warn", Range: dockerfile.Range{StartLine: 4, EndLine: 6}, Stage: &stage},
+			{ID: "two", Severity: analyzer.SeverityWarn, Message: "warn", SuggestedFix: "change it", Range: dockerfile.Range{StartLine: 4, EndLine: 6}, Stage: &stage},
 			{ID: "three", Severity: analyzer.SeverityError, Message: "error", Range: dockerfile.Range{StartLine: 8, EndLine: 8}},
 		},
 	}
@@ -53,8 +54,8 @@ func TestNewOutputMapsResultAndCountsSeverities(t *testing.T) {
 	if output.Summary != (Summary{Info: 1, Warn: 1, Error: 1}) {
 		t.Fatalf("summary=%#v", output.Summary)
 	}
-	want := FindingOutput{ID: "two", Severity: analyzer.SeverityWarn, Message: "warn", Line: 4, EndLine: 6, Stage: &stage}
-	if got := output.Findings[1]; got.ID != want.ID || got.Severity != want.Severity || got.Message != want.Message || got.Line != want.Line || got.EndLine != want.EndLine || got.Stage == nil || *got.Stage != *want.Stage {
+	want := FindingOutput{ID: "two", Severity: analyzer.SeverityWarn, Message: "warn", SuggestedFix: "change it", Line: 4, EndLine: 6, Stage: &stage}
+	if got := output.Findings[1]; got.ID != want.ID || got.Severity != want.Severity || got.Message != want.Message || got.SuggestedFix != want.SuggestedFix || got.Line != want.Line || got.EndLine != want.EndLine || got.Stage == nil || *got.Stage != *want.Stage {
 		t.Fatalf("finding=%#v", got)
 	}
 }
@@ -78,7 +79,7 @@ func TestWriteJSONUsesExplicitLowercaseFieldNames(t *testing.T) {
 	if err := json.Unmarshal(root["findings"], &findings); err != nil || len(findings) != 1 {
 		t.Fatalf("findings=%s, error=%v", root["findings"], err)
 	}
-	assertJSONKeys(t, findings[0], "id", "severity", "message", "line", "end_line", "stage")
+	assertJSONKeys(t, findings[0], "id", "severity", "message", "suggested_fix", "line", "end_line", "stage")
 	if !bytes.Contains(buffer.Bytes(), []byte(`"stage":null`)) {
 		t.Fatalf("missing explicit null stage in %s", buffer.String())
 	}
@@ -135,6 +136,7 @@ func TestWritersPropagateErrors(t *testing.T) {
 		"json":  func() error { return WriteJSON(writer, analyzer.Result{}) },
 		"human": func() error { return WriteHuman(writer, analyzer.Result{}) },
 		"error": func() error { return WriteErrorJSON(writer, "output_error", "broken pipe") },
+		"sarif": func() error { return WriteSARIF(writer, []analyzer.Result{{}}) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := write(); !errors.Is(err, want) {
@@ -144,7 +146,7 @@ func TestWritersPropagateErrors(t *testing.T) {
 	}
 }
 
-func TestWriteErrorJSONV1(t *testing.T) {
+func TestWriteErrorJSONV2(t *testing.T) {
 	var buffer bytes.Buffer
 	if err := WriteErrorJSON(&buffer, "parse_error", "Dockerfile:4: invalid FROM"); err != nil {
 		t.Fatal(err)
@@ -153,11 +155,59 @@ func TestWriteErrorJSONV1(t *testing.T) {
 	if err := json.Unmarshal(buffer.Bytes(), &output); err != nil {
 		t.Fatal(err)
 	}
-	if output.SchemaVersion != "1" || output.Error.Kind != "parse_error" || output.Error.Message != "Dockerfile:4: invalid FROM" {
+	if output.SchemaVersion != "2" || output.Error.Kind != "parse_error" || output.Error.Message != "Dockerfile:4: invalid FROM" {
 		t.Fatalf("output=%#v", output)
 	}
 	root := assertJSONKeys(t, buffer.Bytes(), "schema_version", "error")
 	assertJSONKeys(t, root["error"], "kind", "message")
+}
+
+func TestWriteSARIFAggregatesFiles(t *testing.T) {
+	results := []analyzer.Result{
+		{
+			Source: "services/api/Dockerfile",
+			Findings: []analyzer.Finding{{
+				ID:           "GEN002",
+				Severity:     analyzer.SeverityWarn,
+				Message:      "apt warning",
+				SuggestedFix: "add --no-install-recommends",
+				Range:        dockerfile.Range{StartLine: 3, EndLine: 4},
+			}},
+		},
+		{Source: "services/web/Dockerfile", Findings: []analyzer.Finding{}},
+	}
+	var buffer bytes.Buffer
+	if err := WriteSARIF(&buffer, results); err != nil {
+		t.Fatal(err)
+	}
+	var output SARIFLog
+	if err := json.Unmarshal(buffer.Bytes(), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Version != "2.1.0" || len(output.Runs) != 1 || len(output.Runs[0].Results) != 1 {
+		t.Fatalf("output=%#v", output)
+	}
+	result := output.Runs[0].Results[0]
+	if result.RuleID != "GEN002" || result.Level != "warning" {
+		t.Fatalf("result=%#v", result)
+	}
+	location := result.Locations[0].PhysicalLocation
+	if location.ArtifactLocation.URI != "services/api/Dockerfile" || location.Region.StartLine != 3 || location.Region.EndLine != 4 {
+		t.Fatalf("location=%#v", location)
+	}
+	if result.Properties.SuggestedFix != "add --no-install-recommends" {
+		t.Fatalf("properties=%#v", result.Properties)
+	}
+}
+
+func TestSARIFArtifactURIHandlesAbsolutePathsAndStdin(t *testing.T) {
+	absolute := filepath.Join(t.TempDir(), "Dockerfile")
+	if got := sarifArtifactURI(absolute); !strings.HasPrefix(got, "file://") {
+		t.Fatalf("absolute URI=%q", got)
+	}
+	if got := sarifArtifactURI("-"); got != "stdin:///Dockerfile" {
+		t.Fatalf("stdin URI=%q", got)
+	}
 }
 
 func TestWriteHumanGenericAnalysisDoesNotClaimStackSpecificCleanliness(t *testing.T) {

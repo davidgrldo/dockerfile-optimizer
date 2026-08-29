@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.0] - 2026-08-29
+
+### Added
+
+- Per-stage stack detection: stack-specific rules run for every matching stage, not only the document-level stack. `stack.detected` prefers the final stage.
+- Cache-order rules `PY002` and `NODE002` (`COPY .` before the lock/requirements file).
+- `GEN008` flags secret-like `ARG`/`ENV` names.
+- Directory walk (`dockopt .`) and stdin (`dockopt -`).
+- RUN leading flags such as `--mount` are parsed off the command so checks see the real shell.
+- Aggregated SARIF 2.1.0 output through `--sarif`.
+- Suggested fixes on every finding and a reusable GitHub Action with optional Code Scanning upload.
+
+### Changed
+
+- `JAVA001` only inspects the final stage, so a JDK builder with a JRE/slim runtime is clean.
+
+### Breaking
+
+- JSON success and error envelopes now use schema version `2`; findings add the required `suggested_fix` field.
+
 ## [1.2.0] - 2026-08-29
 
 ### Added

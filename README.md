@@ -21,7 +21,7 @@ on comments, casing, or line continuations.
 - **🎯 Stack-aware** — detects Go, Java, Rust, .NET, PHP, Ruby, Python, Node.js, and C/C++ and runs targeted rules.
 - **🧠 Real parser** — understands stages, continuations, heredocs, and JSON instructions instead of grepping raw lines.
 - **⚙️ Built for CI** — stable rule IDs, a configurable failure threshold, and precise exit codes.
-- **📦 Batch + streaming** — analyze many files in one run; JSON output is [JSON Lines](https://jsonlines.org/), ready for `jq`.
+- **📦 Batch + streaming** — analyze many files or a directory in one run; JSON output is [JSON Lines](https://jsonlines.org/), ready for `jq`.
 - **🪶 Zero dependencies** — a single static Go binary. Fuzz- and race-tested.
 
 ## Quick start
@@ -56,15 +56,18 @@ Stack-specific checks enabled.
 ## Usage
 
 ```text
-dockopt [--json] [--stack <name>] [--fail-on none|warn|error] [--ignore <id,id>] <Dockerfile>...
+dockopt [--json|--sarif] [--stack <name>] [--fail-on none|warn|error] [--ignore <id,id>] <Dockerfile|dir|->...
 ```
 
 Options must appear before the Dockerfile paths:
 
 - `--json` writes the versioned JSON result instead of human-readable output.
+- `--sarif` writes one aggregated SARIF 2.1.0 log for all inputs. It is mutually exclusive with `--json`.
 - `--stack <name>` overrides detection with a validated stack name (applied to every path).
 - `--fail-on none|warn|error` selects the failure threshold. The default is `error`.
 - `--ignore <id,id>` suppresses those rule IDs (case-insensitive) for every path.
+- A directory argument is walked for `Dockerfile`, `Dockerfile.*`, and `*.Dockerfile` (skipping `.git`, `node_modules`, `vendor`, and other hidden directories).
+- `-` reads a Dockerfile from stdin.
 
 The threshold controls only the process status; findings below the threshold still appear in the output.
 
@@ -73,6 +76,9 @@ The threshold controls only the process status; findings below the threshold sti
 ./dockopt --json Dockerfile
 ./dockopt --stack go --fail-on warn Dockerfile
 ./dockopt --ignore GEN001,GEN005 --fail-on warn Dockerfile
+./dockopt .
+./dockopt --json -
+./dockopt --sarif . > dockopt.sarif
 ```
 
 A `# dockopt:disable GEN001,GEN005` comment on the line immediately before an instruction suppresses those rules for that instruction only (blank lines in between are fine).
@@ -92,7 +98,25 @@ Pass more than one path to analyze a batch; use your shell's globbing to expand 
 
 ### In CI
 
-`dockopt` is a single binary with no runtime dependencies, so it drops into any pipeline. A GitHub Actions step that fails the build on any warning or worse:
+Use the bundled action to annotate a pull request through GitHub Code Scanning:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+steps:
+  - uses: actions/checkout@v4
+  - uses: davidgrldo/dockerfile-optimizer@v1
+    with:
+      path: .
+      fail-on: warn
+      ignore: GEN005
+```
+
+Set `upload-sarif: "false"` when Code Scanning upload is not available. The action still exposes `sarif` and `exit-code` outputs.
+
+Alternatively, `dockopt` is a single binary with no runtime dependencies, so it drops into any pipeline:
 
 ```yaml
 - uses: actions/setup-go@v5
@@ -126,7 +150,7 @@ Go, Java, Rust, .NET, PHP, Ruby, Python, Node.js, and C/C++ have stack-specific 
 | Node.js | `node` | ✅ |
 | C/C++ | `c_cpp` | ✅ |
 
-Generic Dockerfile rules run for every stack.
+Generic Dockerfile rules run for every stack. Stack-specific rules also run for every stage whose image or `RUN` commands match that stack (so a Python builder + Go runtime gets both `PY*` and `GO*` checks). Detection for `stack.detected` prefers the **final** stage, then walks backward.
 
 ## Rules
 
@@ -141,28 +165,31 @@ Rule IDs are stable and safe to reference in CI (e.g. to gate on a subset).
 | `GEN005` | warn | all | Final stage runs as root: explicit `USER root`/`0`, or no `USER` at all. Images whose name/tag contains `nonroot` are exempt when `USER` is omitted. |
 | `GEN006` | warn | all | `apk add` without `--no-cache`. |
 | `GEN007` | warn | all | `yum`/`dnf`/`microdnf install` without cleaning the package cache in the same `RUN`. |
+| `GEN008` | warn | all | `ARG`/`ENV` names that look like secrets (`password`, `token`, `api_key`, …). |
 | `GO001` | warn | go | Single-stage Go build (multi-stage shrinks the image). |
 | `GO002` | error | go | `go build` for a `scratch` final image without `CGO_ENABLED=0` (checked on the `RUN` and on stage-level `ENV`/`ARG`). |
 | `GO003` | warn | go | `golang` image used as the final stage. |
-| `JAVA001` | info | java | Full JDK base image (`openjdk`, `eclipse-temurin`, `amazoncorretto`) whose tag is not a slim/JRE variant. |
+| `JAVA001` | info | java | Final stage uses a full JDK base image (`openjdk`, `eclipse-temurin`, `amazoncorretto`) whose tag is not a slim/JRE variant. |
 | `RUST001` | warn | rust | Single-stage Rust build. |
 | `DOTNET001` | warn | dotnet | `mcr.microsoft.com/dotnet/*` base image without an explicit tag. |
 | `PHP001` | warn | php | `composer install` without `--no-dev`. |
 | `PHP002` | warn | php | `composer install` without `--optimize-autoloader`. |
 | `RUBY001` | info | ruby | `bundle install` without `--deployment`. |
 | `PY001` | warn | python | `pip install` without `--no-cache-dir`. |
+| `PY002` | warn | python | `COPY .` before copying the requirements file, which busts the dependency cache. |
 | `NODE001` | warn | node | `npm install` instead of `npm ci`. |
+| `NODE002` | warn | node | `COPY .` before copying `package.json` / lockfile, which busts the dependency cache. |
 | `CCPP001` | warn | c_cpp | Compiler image (`gcc`/`g++`) used as the final stage. |
 
 > **Known limits:** commands inside heredoc bodies are analyzed as flattened text (not a shell AST).
 
 ## JSON schema
 
-Successful JSON output uses schema version `1`:
+Successful JSON output uses schema version `2`:
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "source": "Dockerfile",
   "stack": {
     "detected": "go",
@@ -174,6 +201,7 @@ Successful JSON output uses schema version `1`:
       "id": "GEN001",
       "severity": "warn",
       "message": "Avoid using 'latest' tag in base images",
+      "suggested_fix": "Pin the base image to an explicit immutable tag or digest.",
       "line": 1,
       "end_line": 1,
       "stage": 0
@@ -193,7 +221,7 @@ JSON failures use this envelope and exit `2`:
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "error": {
     "kind": "parse_error",
     "message": "Dockerfile:4: unterminated JSON instruction"

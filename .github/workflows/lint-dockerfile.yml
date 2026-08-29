@@ -6,6 +6,7 @@ on:
       - "**/*.go"
       - go.mod
       - go.sum
+      - action.yml
       - ".github/workflows/**"
       - "testdata/dockerfiles/**"
   pull_request:
@@ -13,6 +14,7 @@ on:
       - "**/*.go"
       - go.mod
       - go.sum
+      - action.yml
       - ".github/workflows/**"
       - "testdata/dockerfiles/**"
 
@@ -32,6 +34,12 @@ jobs:
       - run: go test ./...
       - run: go test -race ./...
       - run: go build -o dockopt ./cmd/dockopt
+      - name: Verify composite action
+        uses: ./
+        with:
+          path: testdata/dockerfiles/clean.Dockerfile
+          fail-on: error
+          upload-sarif: "false"
       - name: Verify fixture exit contracts
         shell: bash
         run: |
@@ -42,7 +50,12 @@ jobs:
           done
           ./dockopt --json testdata/dockerfiles/unsupported-python.Dockerfile >/tmp/python.json
           grep -Fq 'PY001' /tmp/python.json
+          grep -Fq '"schema_version":"2"' /tmp/python.json
+          grep -Fq '"suggested_fix":' /tmp/python.json
           ./dockopt --json --ignore GEN001,GEN005 testdata/dockerfiles/warn-latest.Dockerfile | grep -Fq '"findings":[]'
+          ./dockopt --sarif testdata/dockerfiles/warn-untagged.Dockerfile >/tmp/dockopt.sarif
+          grep -Fq '"version":"2.1.0"' /tmp/dockopt.sarif
+          grep -Fq '"ruleId":"GEN001"' /tmp/dockopt.sarif
 
           set +e
           ./dockopt --json testdata/dockerfiles/error-go-static.Dockerfile >/tmp/error.json
