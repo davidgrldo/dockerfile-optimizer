@@ -163,10 +163,13 @@ func parseInstruction(source, text string, start, end int) (Instruction, error) 
 		Value:    value,
 		Range:    Range{StartLine: start, EndLine: end},
 	}
+	if instruction.Opcode == "RUN" && !strings.HasPrefix(value, "[") {
+		instruction.Flags, instruction.Value = splitLeadingFlags(value)
+	}
 
-	if strings.HasPrefix(value, "[") {
+	if strings.HasPrefix(instruction.Value, "[") {
 		var items []json.RawMessage
-		if err := json.Unmarshal([]byte(value), &items); err != nil {
+		if err := json.Unmarshal([]byte(instruction.Value), &items); err != nil {
 			return Instruction{}, &ParseError{Source: source, Line: start, Message: fmt.Sprintf("invalid JSON array: %v", err)}
 		}
 		instruction.JSON = true
@@ -211,6 +214,16 @@ func parseFrom(value string) (base, name, platform string, err error) {
 		return "", "", "", errors.New("invalid FROM instruction")
 	}
 	return base, fields[1], platform, nil
+}
+
+func splitLeadingFlags(value string) (flags []string, rest string) {
+	fields := strings.Fields(value)
+	i := 0
+	for i < len(fields) && strings.HasPrefix(fields[i], "--") {
+		flags = append(flags, fields[i])
+		i++
+	}
+	return flags, strings.Join(fields[i:], " ")
 }
 
 func parseDisableDirective(line string) ([]string, bool) {

@@ -41,6 +41,15 @@ func TestProductionRuleRegistry(t *testing.T) {
 		{"Java other version still flagged", "FROM openjdk:21\n", StackJava, []string{"JAVA001"}, nil},
 		{"Java temurin full flagged", "FROM eclipse-temurin:17\n", StackJava, []string{"JAVA001"}, nil},
 		{"Java temurin jre not flagged", "FROM eclipse-temurin:17-jre\n", StackJava, nil, []string{"JAVA001"}},
+		{"Java builder JDK not flagged", "FROM eclipse-temurin:17 AS build\nRUN ./mvnw package\nFROM eclipse-temurin:17-jre\nUSER app\n", StackJava, nil, []string{"JAVA001"}},
+		{"pip copy whole context first", "FROM python:3.12-slim\nCOPY . /app\nRUN pip install --no-cache-dir -r requirements.txt\nUSER app\n", StackPython, []string{"PY002"}, nil},
+		{"pip copy requirements first", "FROM python:3.12-slim\nCOPY requirements.txt /app/\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . /app\nUSER app\n", StackPython, nil, []string{"PY002"}},
+		{"npm copy whole context first", "FROM node:22-alpine\nCOPY . /app\nRUN npm ci\nUSER node\n", StackNode, []string{"NODE002"}, nil},
+		{"npm copy package.json first", "FROM node:22-alpine\nCOPY package.json package-lock.json /app/\nRUN npm ci\nCOPY . /app\nUSER node\n", StackNode, nil, []string{"NODE002"}},
+		{"copy from stage is not build context", "FROM node:22-alpine AS build\nRUN npm ci\nFROM node:22-alpine\nCOPY --from=build . /app\nRUN npm ci\nUSER node\n", StackNode, nil, []string{"NODE002"}},
+		{"secret ARG flagged", "FROM alpine:3.20\nARG GITHUB_TOKEN\nUSER app\n", StackGeneric, []string{"GEN008"}, nil},
+		{"plain ARG not flagged", "FROM alpine:3.20\nARG VERSION=1\nUSER app\n", StackGeneric, nil, []string{"GEN008"}},
+		{"secret substring is not a secret name", "FROM alpine:3.20\nARG NONSECRET=1\nENV SECRETARY=app\nUSER app\n", StackGeneric, nil, []string{"GEN008"}},
 		{"apt missing no-install-recommends", "FROM debian:bookworm\nRUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*\n", StackGeneric, []string{"GEN002"}, []string{"GEN003"}},
 		{"apt missing cache cleanup", "FROM debian:bookworm\nRUN apt-get install -y --no-install-recommends curl\n", StackGeneric, []string{"GEN003"}, []string{"GEN002"}},
 		{"apt clean and lean", "FROM debian:bookworm\nRUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*\n", StackGeneric, nil, []string{"GEN002", "GEN003"}},
@@ -141,6 +150,23 @@ func TestGoFindingRangesAndStages(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRunsRulesForEveryStageStack(t *testing.T) {
+	result := Analyze(parseTestDocument(t, "FROM python:3.12-slim AS build\nRUN pip install flask\nFROM golang:1.24\nUSER app\n"), "")
+	ids := map[string]bool{}
+	for _, finding := range result.Findings {
+		ids[finding.ID] = true
+	}
+	if result.DetectedStack != StackGo {
+		t.Fatalf("detected=%q want go", result.DetectedStack)
+	}
+	if !ids["PY001"] {
+		t.Fatalf("expected PY001 on python builder; got %#v", result.Findings)
+	}
+	if !ids["GO003"] {
+		t.Fatalf("expected GO003 on golang final; got %#v", result.Findings)
+	}
+}
+
 func TestAnalyzeIgnoresRuleIDsFromArgument(t *testing.T) {
 	result := Analyze(parseTestDocument(t, "FROM ubuntu:latest\nUSER app\n"), StackGeneric, "GEN001")
 	for _, finding := range result.Findings {
@@ -148,6 +174,19 @@ func TestAnalyzeIgnoresRuleIDsFromArgument(t *testing.T) {
 			t.Fatalf("GEN001 should be ignored: %#v", result.Findings)
 		}
 	}
+}
+
+func TestFindingsIncludeSuggestedFixes(t *testing.T) {
+	result := Analyze(parseTestDocument(t, "FROM debian:bookworm\nRUN apt-get install curl\nUSER app\n"), StackGeneric)
+	for _, finding := range result.Findings {
+		if finding.ID == "GEN002" {
+			if finding.SuggestedFix == "" {
+				t.Fatal("GEN002 must include a suggested fix")
+			}
+			return
+		}
+	}
+	t.Fatalf("GEN002 absent: %#v", result.Findings)
 }
 
 func TestAnalyzeGenericRunsOnlyGenericRulesAndIsUnsupported(t *testing.T) {
@@ -161,7 +200,7 @@ func TestAnalyzeGenericRunsOnlyGenericRulesAndIsUnsupported(t *testing.T) {
 }
 
 func TestRuleRegistryMetadata(t *testing.T) {
-	wantIDs := []string{"CCPP001", "DOTNET001", "GEN001", "GEN002", "GEN003", "GEN004", "GEN005", "GEN006", "GEN007", "GO001", "GO002", "GO003", "JAVA001", "NODE001", "PHP001", "PHP002", "PY001", "RUBY001", "RUST001"}
+	wantIDs := []string{"CCPP001", "DOTNET001", "GEN001", "GEN002", "GEN003", "GEN004", "GEN005", "GEN006", "GEN007", "GEN008", "GO001", "GO002", "GO003", "JAVA001", "NODE001", "NODE002", "PHP001", "PHP002", "PY001", "PY002", "RUBY001", "RUST001"}
 	wantSeverity := map[string]Severity{
 		"GEN001":    SeverityWarn,
 		"GEN002":    SeverityWarn,
@@ -170,6 +209,7 @@ func TestRuleRegistryMetadata(t *testing.T) {
 		"GEN005":    SeverityWarn,
 		"GEN006":    SeverityWarn,
 		"GEN007":    SeverityWarn,
+		"GEN008":    SeverityWarn,
 		"GO001":     SeverityWarn,
 		"GO002":     SeverityError,
 		"GO003":     SeverityWarn,
@@ -180,7 +220,9 @@ func TestRuleRegistryMetadata(t *testing.T) {
 		"PHP002":    SeverityWarn,
 		"RUBY001":   SeverityInfo,
 		"PY001":     SeverityWarn,
+		"PY002":     SeverityWarn,
 		"NODE001":   SeverityWarn,
+		"NODE002":   SeverityWarn,
 		"CCPP001":   SeverityWarn,
 	}
 
@@ -197,6 +239,9 @@ func TestRuleRegistryMetadata(t *testing.T) {
 		}
 		if len(r.stacks) == 0 || r.check == nil {
 			t.Errorf("rule %s missing stacks or check", r.id)
+		}
+		if suggestedFix(r.id) == "" {
+			t.Errorf("rule %s missing suggested fix", r.id)
 		}
 	}
 	sort.Strings(gotIDs)

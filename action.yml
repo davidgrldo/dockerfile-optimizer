@@ -1,0 +1,81 @@
+name: Dockerfile Optimizer
+description: Analyze Dockerfiles with dockopt and optionally upload SARIF to GitHub Code Scanning
+
+inputs:
+  path:
+    description: Dockerfile, directory, or newline-separated paths to analyze
+    required: false
+    default: "."
+  fail-on:
+    description: Failure threshold (none, warn, or error)
+    required: false
+    default: warn
+  ignore:
+    description: Comma-separated rule IDs to suppress
+    required: false
+    default: ""
+  upload-sarif:
+    description: Upload findings to GitHub Code Scanning
+    required: false
+    default: "true"
+
+outputs:
+  sarif:
+    description: Path to the generated SARIF file
+    value: ${{ steps.analyze.outputs.sarif }}
+  exit-code:
+    description: dockopt process exit code
+    value: ${{ steps.analyze.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+      with:
+        go-version-file: ${{ github.action_path }}/go.mod
+
+    - name: Build dockopt
+      shell: bash
+      run: |
+        cd "$GITHUB_ACTION_PATH"
+        go build -o "$RUNNER_TEMP/dockopt" ./cmd/dockopt
+
+    - name: Analyze Dockerfiles
+      id: analyze
+      shell: bash
+      env:
+        DOCKOPT_PATHS: ${{ inputs.path }}
+        DOCKOPT_FAIL_ON: ${{ inputs.fail-on }}
+        DOCKOPT_IGNORE: ${{ inputs.ignore }}
+      run: |
+        args=(--sarif --fail-on "$DOCKOPT_FAIL_ON")
+        if [[ -n "$DOCKOPT_IGNORE" ]]; then
+          args+=(--ignore "$DOCKOPT_IGNORE")
+        fi
+        mapfile -t requested_paths <<< "$DOCKOPT_PATHS"
+        paths=()
+        for path in "${requested_paths[@]}"; do
+          if [[ -n "$path" ]]; then
+            paths+=("$path")
+          fi
+        done
+        sarif="$RUNNER_TEMP/dockopt.sarif"
+        set +e
+        "$RUNNER_TEMP/dockopt" "${args[@]}" "${paths[@]}" > "$sarif"
+        status=$?
+        set -e
+        echo "sarif=$sarif" >> "$GITHUB_OUTPUT"
+        echo "exit-code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: Upload SARIF
+      if: inputs.upload-sarif == 'true' && steps.analyze.outputs.exit-code != '2'
+      uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d
+      with:
+        sarif_file: ${{ steps.analyze.outputs.sarif }}
+
+    - name: Enforce dockopt result
+      shell: bash
+      env:
+        DOCKOPT_EXIT_CODE: ${{ steps.analyze.outputs.exit-code }}
+      run: exit "$DOCKOPT_EXIT_CODE"

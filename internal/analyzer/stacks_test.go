@@ -52,8 +52,18 @@ func TestDetectStackPrefersFirstBaseImageEvidenceOverLaterRuns(t *testing.T) {
 
 func TestDetectStackUsesBaseImagesInStageOrder(t *testing.T) {
 	doc := parseTestDocument(t, "FROM python:3.12 AS build\nFROM golang:1.24\n")
-	if got := DetectStack(doc); got != StackPython {
-		t.Errorf("got=%q want=%q", got, StackPython)
+	if got := DetectStack(doc); got != StackGo {
+		t.Errorf("got=%q want=%q (final stage)", got, StackGo)
+	}
+}
+
+func TestDetectStageStackPerStage(t *testing.T) {
+	doc := parseTestDocument(t, "FROM python:3.12 AS build\nRUN pip install --no-cache-dir flask\nFROM golang:1.24\n")
+	if got := DetectStageStack(doc.Stages[0]); got != StackPython {
+		t.Errorf("build stage=%q want python", got)
+	}
+	if got := DetectStageStack(doc.Stages[1]); got != StackGo {
+		t.Errorf("final stage=%q want go", got)
 	}
 }
 
@@ -89,11 +99,11 @@ func TestStackValidationAndSupport(t *testing.T) {
 
 func TestStackRuleIDsComeFromRegisteredRules(t *testing.T) {
 	want := map[Stack][]string{
-		StackGeneric: {"GEN001", "GEN002", "GEN003", "GEN004", "GEN005", "GEN006", "GEN007"},
+		StackGeneric: {"GEN001", "GEN002", "GEN003", "GEN004", "GEN005", "GEN006", "GEN007", "GEN008"},
 		StackGo:      {"GO001", "GO002", "GO003"},
 		StackJava:    {"JAVA001"},
-		StackPython:  {"PY001"},
-		StackNode:    {"NODE001"},
+		StackPython:  {"PY001", "PY002"},
+		StackNode:    {"NODE001", "NODE002"},
 		StackRust:    {"RUST001"},
 		StackDotNet:  {"DOTNET001"},
 		StackPHP:     {"PHP001", "PHP002"},

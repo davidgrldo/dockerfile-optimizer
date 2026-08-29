@@ -8,6 +8,7 @@ type Instruction struct {
 	JSON                    bool
 	Range                   Range
 	Disabled                []string
+	Flags                   []string
 }
 type Stage struct {
 	Index                     int

@@ -33,7 +33,7 @@ var stackRegistry = []stackDefinition{
 	{stack: StackGo, imageRepositories: []string{"golang"}, commandSequences: []string{"go build"}},
 	{stack: StackJava, imageRepositories: []string{"openjdk", "java", "maven", "gradle"}, commandSequences: []string{"java", "maven", "gradle"}},
 	{stack: StackPython, imageRepositories: []string{"python"}, commandSequences: []string{"pip install"}},
-	{stack: StackNode, imageRepositories: []string{"node"}, commandSequences: []string{"npm install", "yarn"}},
+	{stack: StackNode, imageRepositories: []string{"node"}, commandSequences: []string{"npm install", "npm ci", "yarn"}},
 	{stack: StackRust, imageRepositories: []string{"rust"}, commandSequences: []string{"rustc", "cargo"}},
 	{stack: StackDotNet, imageRepositories: []string{"dotnet"}, commandSequences: []string{"dotnet", "csproj"}},
 	{stack: StackPHP, imageRepositories: []string{"php"}, commandSequences: []string{"composer"}},
@@ -55,12 +55,21 @@ func IsSupported(stack Stack) bool {
 }
 
 func DetectStack(doc *dockerfile.Document) Stack {
-	for _, stage := range doc.Stages {
-		if stack, ok := detectStackFromImage(stage.BaseImage); ok {
+	for i := len(doc.Stages) - 1; i >= 0; i-- {
+		if stack := DetectStageStack(doc.Stages[i]); stack != StackGeneric {
 			return stack
 		}
 	}
-	for _, instruction := range doc.Instructions {
+	return StackGeneric
+}
+
+// DetectStageStack returns the stack evidenced by a stage's base image, or by
+// RUN commands in that stage if the image is unrecognized.
+func DetectStageStack(stage dockerfile.Stage) Stack {
+	if stack, ok := detectStackFromImage(stage.BaseImage); ok {
+		return stack
+	}
+	for _, instruction := range stage.Instructions {
 		if instruction.Opcode != "RUN" {
 			continue
 		}

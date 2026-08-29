@@ -154,6 +154,20 @@ func TestParseUnterminatedHeredoc(t *testing.T) {
 	}
 }
 
+func TestParseRunMountFlags(t *testing.T) {
+	doc, err := Parse("Dockerfile", strings.NewReader("FROM alpine\nRUN --mount=type=cache,target=/root/.cache apk add --no-cache curl\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := doc.Stages[0].Instructions[0]
+	if len(run.Flags) != 1 || run.Flags[0] != "--mount=type=cache,target=/root/.cache" {
+		t.Fatalf("flags=%v", run.Flags)
+	}
+	if run.Value != "apk add --no-cache curl" {
+		t.Fatalf("value=%q", run.Value)
+	}
+}
+
 func TestParseHereStringIsNotHeredoc(t *testing.T) {
 	doc, err := Parse("Dockerfile", strings.NewReader("FROM alpine:3.19\nRUN cat <<<\"inline\"\nRUN echo done\n"))
 	if err != nil {

@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -16,6 +18,9 @@ import (
 
 func run(args []string, stdout, stderr io.Writer) int {
 	return runWithOpener(args, stdout, stderr, func(path string) (io.ReadCloser, error) {
+		if path == "-" {
+			return io.NopCloser(os.Stdin), nil
+		}
 		return os.Open(path)
 	})
 }
@@ -25,18 +30,25 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 	flags := flag.NewFlagSet("dockopt", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	jsonMode := flags.Bool("json", false, "output results as JSON")
+	sarifMode := flags.Bool("sarif", false, "output one aggregated SARIF 2.1.0 log")
 	stackName := flags.String("stack", "", "override detected stack")
 	failOn := flags.String("fail-on", "error", "failure threshold: none, warn, or error")
 	ignoreRules := flags.String("ignore", "", "comma-separated rule IDs to suppress")
 	if err := flags.Parse(args); err != nil {
 		return writeFailure(stdout, stderr, jsonRequested, "usage_error", err)
 	}
-	paths := flags.Args()
+	if *jsonMode && *sarifMode {
+		return writeFailure(stdout, stderr, false, "usage_error", errors.New("--json and --sarif are mutually exclusive"))
+	}
+	paths, err := expandInputs(flags.Args())
+	if err != nil {
+		return writeFailure(stdout, stderr, *jsonMode, "input_error", err)
+	}
 	if len(paths) < 1 {
 		return writeFailure(stdout, stderr, *jsonMode, "usage_error", errors.New("expected at least one Dockerfile path"))
 	}
 	for _, path := range paths {
-		if strings.HasPrefix(path, "-") {
+		if path != "-" && strings.HasPrefix(path, "-") {
 			return writeFailure(stdout, stderr, *jsonMode, "usage_error", errors.New("flags must appear before Dockerfile paths"))
 		}
 	}
@@ -63,6 +75,9 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 	}
 
 	multi := len(paths) > 1
+	if *sarifMode {
+		return analyzeSARIF(paths, stdout, stderr, override, *failOn, ignore, open)
+	}
 	exit := 0
 	for _, path := range paths {
 		if code := analyzePath(path, stdout, stderr, *jsonMode, multi, override, *failOn, ignore, open); code > exit {
@@ -76,25 +91,10 @@ func runWithOpener(args []string, stdout, stderr io.Writer, open func(string) (i
 // per-file exit contribution: 0 clean, 1 threshold reached, 2 could not analyze.
 // The caller keeps the maximum across all paths.
 func analyzePath(path string, stdout, stderr io.Writer, jsonMode, multi bool, override analyzer.Stack, failOn string, ignore []string, open func(string) (io.ReadCloser, error)) int {
-	file, err := open(path)
+	result, kind, err := analyzeInput(path, override, ignore, open)
 	if err != nil {
-		return writeFailure(stdout, stderr, jsonMode, "input_error", err)
-	}
-
-	doc, err := dockerfile.Parse(path, file)
-	closeErr := file.Close()
-	if err != nil {
-		kind := "input_error"
-		var parseErr *dockerfile.ParseError
-		if errors.As(err, &parseErr) {
-			kind = "parse_error"
-		}
 		return writeFailure(stdout, stderr, jsonMode, kind, err)
 	}
-	if closeErr != nil {
-		return writeFailure(stdout, stderr, jsonMode, "input_error", fmt.Errorf("close %s: %w", path, closeErr))
-	}
-	result := analyzer.Analyze(doc, override, ignore...)
 
 	if jsonMode {
 		err = report.WriteJSON(stdout, result)
@@ -115,6 +115,48 @@ func analyzePath(path string, stdout, stderr io.Writer, jsonMode, multi bool, ov
 		return 1
 	}
 	return 0
+}
+
+func analyzeInput(path string, override analyzer.Stack, ignore []string, open func(string) (io.ReadCloser, error)) (analyzer.Result, string, error) {
+	file, err := open(path)
+	if err != nil {
+		return analyzer.Result{}, "input_error", err
+	}
+
+	doc, err := dockerfile.Parse(path, file)
+	closeErr := file.Close()
+	if err != nil {
+		kind := "input_error"
+		var parseErr *dockerfile.ParseError
+		if errors.As(err, &parseErr) {
+			kind = "parse_error"
+		}
+		return analyzer.Result{}, kind, err
+	}
+	if closeErr != nil {
+		return analyzer.Result{}, "input_error", fmt.Errorf("close %s: %w", path, closeErr)
+	}
+	return analyzer.Analyze(doc, override, ignore...), "", nil
+}
+
+func analyzeSARIF(paths []string, stdout, stderr io.Writer, override analyzer.Stack, failOn string, ignore []string, open func(string) (io.ReadCloser, error)) int {
+	results := make([]analyzer.Result, 0, len(paths))
+	exit := 0
+	for _, path := range paths {
+		result, kind, err := analyzeInput(path, override, ignore, open)
+		if err != nil {
+			return writeFailure(stdout, stderr, false, kind, err)
+		}
+		results = append(results, result)
+		if meetsThreshold(result.Findings, failOn) {
+			exit = 1
+		}
+	}
+	if err := report.WriteSARIF(stdout, results); err != nil {
+		_, _ = fmt.Fprintf(stderr, "output_error: %v\n", err)
+		return 2
+	}
+	return exit
 }
 
 func requestsJSON(args []string) bool {
@@ -180,4 +222,71 @@ func parseIgnore(value string) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+func expandInputs(paths []string) ([]string, error) {
+	var out []string
+	for _, path := range paths {
+		if path == "-" {
+			out = append(out, path)
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			out = append(out, path)
+			continue
+		}
+		if !info.IsDir() {
+			out = append(out, path)
+			continue
+		}
+		found, err := findDockerfiles(path)
+		if err != nil {
+			return nil, err
+		}
+		if len(found) == 0 {
+			return nil, fmt.Errorf("no Dockerfiles found in %s", path)
+		}
+		out = append(out, found...)
+	}
+	return out, nil
+}
+
+func findDockerfiles(root string) ([]string, error) {
+	var found []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != root && skipDirectory(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if isDockerfileName(d.Name()) {
+			found = append(found, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return found, nil
+}
+
+func skipDirectory(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	switch name {
+	case "node_modules", "vendor":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDockerfileName(name string) bool {
+	return name == "Dockerfile" || name == "dockerfile" || strings.HasPrefix(name, "Dockerfile.") || strings.HasSuffix(name, ".Dockerfile")
 }
