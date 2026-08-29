@@ -52,7 +52,7 @@ jobs:
           grep -Fq 'PY001' /tmp/python.json
           grep -Fq '"schema_version":"2"' /tmp/python.json
           grep -Fq '"suggested_fix":' /tmp/python.json
-          ./dockopt --json --ignore GEN001,GEN005 testdata/dockerfiles/warn-latest.Dockerfile | grep -Fq '"findings":[]'
+          ./dockopt --json --ignore GEN001,GEN005,GEN010 testdata/dockerfiles/warn-latest.Dockerfile | grep -Fq '"findings":[]'
           ./dockopt --sarif testdata/dockerfiles/warn-untagged.Dockerfile >/tmp/dockopt.sarif
           grep -Fq '"version":"2.1.0"' /tmp/dockopt.sarif
           grep -Fq '"ruleId":"GEN001"' /tmp/dockopt.sarif

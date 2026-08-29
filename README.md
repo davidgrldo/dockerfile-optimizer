@@ -56,16 +56,19 @@ Stack-specific checks enabled.
 ## Usage
 
 ```text
-dockopt [--json|--sarif] [--stack <name>] [--fail-on none|warn|error] [--ignore <id,id>] <Dockerfile|dir|->...
+dockopt [--json|--sarif] [--stack <name>] [--fail-on none|warn|error] [--ignore <id,id>] [--config <path>] [--no-config] [--fix] <Dockerfile|dir|->...
 ```
 
 Options must appear before the Dockerfile paths:
 
 - `--json` writes the versioned JSON result instead of human-readable output.
-- `--sarif` writes one aggregated SARIF 2.1.0 log for all inputs. It is mutually exclusive with `--json`.
+- `--sarif` writes one aggregated SARIF 2.1.0 log for all inputs. It is mutually exclusive with `--json`. Parse errors are reported on stderr and the log still includes results from files that parsed.
 - `--stack <name>` overrides detection with a validated stack name (applied to every path).
 - `--fail-on none|warn|error` selects the failure threshold. The default is `error`.
 - `--ignore <id,id>` suppresses those rule IDs (case-insensitive) for every path.
+- `--config <path>` loads `.dockopt.yml` from an explicit path. Otherwise dockopt walks from the working directory up to the nearest Git root.
+- `--no-config` skips `.dockopt.yml`. CLI flags override matching config keys; `--ignore` is merged with the file.
+- `--fix` rewrites `GEN002`, `GEN003`, and `GEN006` in place (not stdin, not heredoc `RUN`s), then reports remaining findings.
 - A directory argument is walked for `Dockerfile`, `Dockerfile.*`, and `*.Dockerfile` (skipping `.git`, `node_modules`, `vendor`, and other hidden directories).
 - `-` reads a Dockerfile from stdin.
 
@@ -76,12 +79,25 @@ The threshold controls only the process status; findings below the threshold sti
 ./dockopt --json Dockerfile
 ./dockopt --stack go --fail-on warn Dockerfile
 ./dockopt --ignore GEN001,GEN005 --fail-on warn Dockerfile
+./dockopt --fix Dockerfile
+./dockopt --config .dockopt.yml .
 ./dockopt .
 ./dockopt --json -
 ./dockopt --sarif . > dockopt.sarif
 ```
 
 A `# dockopt:disable GEN001,GEN005` comment on the line immediately before an instruction suppresses those rules for that instruction only (blank lines in between are fine).
+
+Repo-level defaults live in `.dockopt.yml` (searched from the current directory up to `.git`):
+
+```yaml
+fail-on: warn
+ignore:
+  - GEN010
+stack: go
+```
+
+CLI `--fail-on` and `--stack` override the file. `--ignore` is additive.
 
 ### Multiple files
 
@@ -94,6 +110,7 @@ Pass more than one path to analyze a batch; use your shell's globbing to expand 
 
 - Human output prefixes each report with a `==> path <==` header.
 - JSON output is emitted as [JSON Lines](https://jsonlines.org/): one result object (same schema below) per line, including a per-file error envelope for any file that fails to parse. This streams cleanly into `jq -c`.
+- `--sarif` writes one log for the files that parsed and prints parse/input errors on stderr.
 - The exit code is the most severe outcome across all paths (`2` over `1` over `0`), so one unparseable file surfaces as `2` even when the rest are clean.
 
 ### In CI
@@ -166,12 +183,19 @@ Rule IDs are stable and safe to reference in CI (e.g. to gate on a subset).
 | `GEN006` | warn | all | `apk add` without `--no-cache`. |
 | `GEN007` | warn | all | `yum`/`dnf`/`microdnf install` without cleaning the package cache in the same `RUN`. |
 | `GEN008` | warn | all | `ARG`/`ENV` names that look like secrets (`password`, `token`, `api_key`, …). |
-| `GO001` | warn | go | Single-stage Go build (multi-stage shrinks the image). |
+| `GEN009` | warn | all | `RUN` for apt/go/npm/yarn/pnpm/pip/cargo without `--mount=type=cache`. |
+| `GEN010` | info | all | Tagged base image without a digest pin. `scratch`, stage refs, digests, and `FROM image:${VAR}` are exempt. Noisy; ignore in `.dockopt.yml` if you only pin tags. |
+| `GO001` | warn | go | Single-stage file that actually compiles (`go build`/`test`/`install`). |
 | `GO002` | error | go | `go build` for a `scratch` final image without `CGO_ENABLED=0` (checked on the `RUN` and on stage-level `ENV`/`ARG`). |
 | `GO003` | warn | go | `golang` image used as the final stage. |
+| `GO004` | warn | go | `COPY .` before `go.mod`/`go.sum` when a Go module/build command follows. |
 | `JAVA001` | info | java | Final stage uses a full JDK base image (`openjdk`, `eclipse-temurin`, `amazoncorretto`) whose tag is not a slim/JRE variant. |
-| `RUST001` | warn | rust | Single-stage Rust build. |
+| `RUST001` | warn | rust | Single-stage file that actually compiles (`cargo build`/`test` or `rustc`). |
+| `RUST002` | warn | rust | `COPY .` before `Cargo.toml`/`Cargo.lock` when a Cargo command follows. |
+| `RUST003` | warn | rust | `cargo build` without `--release`. |
+| `RUST004` | warn | rust | Full `rust` image (not slim/alpine/distroless) used as the final stage. |
 | `DOTNET001` | warn | dotnet | `mcr.microsoft.com/dotnet/*` base image without an explicit tag. |
+| `DOTNET002` | warn | dotnet | .NET SDK image used as the final stage. |
 | `PHP001` | warn | php | `composer install` without `--no-dev`. |
 | `PHP002` | warn | php | `composer install` without `--optimize-autoloader`. |
 | `RUBY001` | info | ruby | `bundle install` without `--deployment`. |
@@ -179,9 +203,11 @@ Rule IDs are stable and safe to reference in CI (e.g. to gate on a subset).
 | `PY002` | warn | python | `COPY .` before copying the requirements file, which busts the dependency cache. |
 | `NODE001` | warn | node | `npm install` instead of `npm ci`. |
 | `NODE002` | warn | node | `COPY .` before copying `package.json` / lockfile, which busts the dependency cache. |
+| `NODE003` | warn | node | `yarn install` without `--frozen-lockfile`/`--immutable`, or `pnpm install` without `--frozen-lockfile`. |
+| `NODE004` | warn | node | Node package install without `NODE_ENV=production`. |
 | `CCPP001` | warn | c_cpp | Compiler image (`gcc`/`g++`) used as the final stage. |
 
-> **Known limits:** commands inside heredoc bodies are analyzed as flattened text (not a shell AST).
+> **Known limits:** commands inside heredoc bodies are analyzed as flattened text (not a shell AST). `--fix` does not rewrite heredoc or JSON-form `RUN` instructions.
 
 ## JSON schema
 

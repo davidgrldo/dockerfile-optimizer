@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.4.0] - 2026-08-30
+
+### Added
+
+- Cache-order rules `GO004` and `RUST002`, cache-mount rule `GEN009`, digest-pin `GEN010` (info).
+- Node rules `NODE003` (yarn/pnpm frozen lockfile) and `NODE004` (`NODE_ENV=production`).
+- `DOTNET002` (SDK image as final), `RUST003` (`cargo build --release`), `RUST004` (full rust image as final).
+- `.dockopt.yml` (`fail-on`, `ignore`, `stack`) with `--config` / `--no-config`. CLI flags override; `--ignore` merges.
+- `--fix` for mechanical `GEN002`, `GEN003`, and `GEN006` (skips heredocs and stdin).
+
+### Changed
+
+- `GO001` and `RUST001` only fire when the single stage actually compiles.
+- `--sarif` continues after a parse/input error, writes findings for the files that parsed, and still exits `2`. The GitHub Action uploads that partial SARIF.
+
 ## [1.3.0] - 2026-08-29
 
 ### Added

@@ -3,6 +3,7 @@ package analyzer
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -35,7 +36,8 @@ func TestProductionRuleRegistry(t *testing.T) {
 		{"PHP flags independent", "FROM php:8.4\nRUN composer install --no-dev\n", StackPHP, []string{"PHP002"}, []string{"PHP001"}},
 		{"PHP spaced command", "FROM php:8.4\nRUN composer   install\n", StackPHP, []string{"PHP001", "PHP002"}, nil},
 		{"PHP prefixed command ignored", "FROM php:8.4\nRUN notcomposer install\n", StackPHP, nil, []string{"PHP001", "PHP002"}},
-		{"Go single stage", "FROM alpine:3.20\n", StackGo, []string{"GO001"}, nil},
+		{"Go single stage without compile is not GO001", "FROM alpine:3.20\nUSER app\n", StackGo, nil, []string{"GO001"}},
+		{"Go single stage with compile", "FROM golang:1.24\nRUN go build -o /app\nUSER app\n", StackGo, []string{"GO001"}, nil},
 		{"Java full runtime", "FROM openjdk:17\n", StackJava, []string{"JAVA001"}, nil},
 		{"Java slim runtime", "FROM openjdk:17-slim\n", StackJava, nil, []string{"JAVA001"}},
 		{"Java other version still flagged", "FROM openjdk:21\n", StackJava, []string{"JAVA001"}, nil},
@@ -73,7 +75,28 @@ func TestProductionRuleRegistry(t *testing.T) {
 		{"gcc final image", "FROM gcc:14\nRUN make\nUSER app\n", StackCCPP, []string{"CCPP001"}, nil},
 		{"gcc builder with runtime final", "FROM gcc:14 AS build\nRUN make\nFROM alpine:3.20\nCOPY --from=build /app /app\nUSER app\n", StackCCPP, nil, []string{"CCPP001"}},
 		{"disable comment suppresses latest", "# dockopt:disable GEN001\nFROM ubuntu:latest\nUSER app\n", StackGeneric, nil, []string{"GEN001"}},
-		{"Rust single stage", "FROM rust:1.88\n", StackRust, []string{"RUST001"}, nil},
+		{"Rust single stage without compile is not RUST001", "FROM alpine:3.20\nUSER app\n", StackRust, nil, []string{"RUST001"}},
+		{"Rust single stage with cargo build", "FROM rust:1.88\nRUN cargo build --release\nUSER app\n", StackRust, []string{"RUST001"}, nil},
+		{"go.mod copied after source", "FROM golang:1.24 AS build\nCOPY . /src\nRUN go mod download\nUSER app\n", StackGo, []string{"GO004"}, nil},
+		{"go.mod copied before source", "FROM golang:1.24 AS build\nCOPY go.mod go.sum /src/\nRUN go mod download\nCOPY . /src\nUSER app\n", StackGo, nil, []string{"GO004"}},
+		{"Cargo.toml copied after source", "FROM rust:1.88 AS build\nCOPY . /src\nRUN cargo fetch\nUSER app\n", StackRust, []string{"RUST002"}, nil},
+		{"Cargo.toml copied before source", "FROM rust:1.88 AS build\nCOPY Cargo.toml Cargo.lock /src/\nRUN cargo fetch\nCOPY . /src\nUSER app\n", StackRust, nil, []string{"RUST002"}},
+		{"go build without cache mount", "FROM golang:1.24 AS build\nRUN go build -o /app\nUSER app\n", StackGo, []string{"GEN009"}, nil},
+		{"go build with cache mount", "FROM golang:1.24 AS build\nRUN --mount=type=cache,target=/go/pkg/mod go build -o /app\nUSER app\n", StackGo, nil, []string{"GEN009"}},
+		{"yarn install without frozen lockfile", "FROM node:22-alpine\nRUN yarn install\nUSER node\n", StackNode, []string{"NODE003"}, nil},
+		{"yarn install with immutable", "FROM node:22-alpine\nRUN yarn install --immutable\nUSER node\n", StackNode, nil, []string{"NODE003"}},
+		{"pnpm install without frozen lockfile", "FROM node:22-alpine\nRUN pnpm install\nUSER node\n", StackNode, []string{"NODE003"}, nil},
+		{"node install without NODE_ENV", "FROM node:22-alpine\nRUN npm ci\nUSER node\n", StackNode, []string{"NODE004"}, nil},
+		{"node install with NODE_ENV", "FROM node:22-alpine\nENV NODE_ENV=production\nRUN npm ci\nUSER node\n", StackNode, nil, []string{"NODE004"}},
+		{"dotnet sdk as final", "FROM mcr.microsoft.com/dotnet/sdk:8.0\nUSER app\n", StackDotNet, []string{"DOTNET002"}, nil},
+		{"dotnet aspnet as final", "FROM mcr.microsoft.com/dotnet/aspnet:8.0\nUSER app\n", StackDotNet, nil, []string{"DOTNET002"}},
+		{"cargo build without release", "FROM rust:1.88-alpine AS build\nRUN cargo build\nUSER app\n", StackRust, []string{"RUST003"}, nil},
+		{"cargo build with release", "FROM rust:1.88-alpine AS build\nRUN cargo build --release\nUSER app\n", StackRust, nil, []string{"RUST003"}},
+		{"rust full image as final", "FROM rust:1.88\nRUN cargo build --release\nUSER app\n", StackRust, []string{"RUST004"}, nil},
+		{"rust alpine as final", "FROM rust:1.88-alpine\nRUN cargo build --release\nUSER app\n", StackRust, nil, []string{"RUST004"}},
+		{"tagged image without digest", "FROM alpine:3.20\nUSER app\n", StackGeneric, []string{"GEN010"}, nil},
+		{"digest pinned image", "FROM alpine:3.20@sha256:0123456789abcdef\nUSER app\n", StackGeneric, nil, []string{"GEN010"}},
+		{"ARG-substituted FROM skips digest pin", "ARG VER=3.20\nFROM alpine:${VER}\nUSER app\n", StackGeneric, nil, []string{"GEN010"}},
 		{"dotnet untagged", "FROM mcr.microsoft.com/dotnet/runtime\n", StackDotNet, []string{"DOTNET001"}, nil},
 		{"dotnet latest handled generically", "FROM mcr.microsoft.com/dotnet/runtime:latest\n", StackDotNet, []string{"GEN001"}, []string{"DOTNET001"}},
 		{"PHP both flags missing", "FROM php:8.4\nRUN composer install\n", StackPHP, []string{"PHP001", "PHP002"}, nil},
@@ -194,13 +217,20 @@ func TestAnalyzeGenericRunsOnlyGenericRulesAndIsUnsupported(t *testing.T) {
 	if result.Supported {
 		t.Fatal("generic analysis must not claim stack-specific support")
 	}
-	if len(result.Findings) != 1 || result.Findings[0].ID != "GEN001" {
-		t.Fatalf("findings=%#v, want only GEN001", result.Findings)
+	ids := map[string]bool{}
+	for _, finding := range result.Findings {
+		if !strings.HasPrefix(finding.ID, "GEN") {
+			t.Fatalf("generic analysis emitted stack rule %s: %#v", finding.ID, result.Findings)
+		}
+		ids[finding.ID] = true
+	}
+	if !ids["GEN001"] {
+		t.Fatalf("findings=%#v, want GEN001", result.Findings)
 	}
 }
 
 func TestRuleRegistryMetadata(t *testing.T) {
-	wantIDs := []string{"CCPP001", "DOTNET001", "GEN001", "GEN002", "GEN003", "GEN004", "GEN005", "GEN006", "GEN007", "GEN008", "GO001", "GO002", "GO003", "JAVA001", "NODE001", "NODE002", "PHP001", "PHP002", "PY001", "PY002", "RUBY001", "RUST001"}
+	wantIDs := []string{"CCPP001", "DOTNET001", "DOTNET002", "GEN001", "GEN002", "GEN003", "GEN004", "GEN005", "GEN006", "GEN007", "GEN008", "GEN009", "GEN010", "GO001", "GO002", "GO003", "GO004", "JAVA001", "NODE001", "NODE002", "NODE003", "NODE004", "PHP001", "PHP002", "PY001", "PY002", "RUBY001", "RUST001", "RUST002", "RUST003", "RUST004"}
 	wantSeverity := map[string]Severity{
 		"GEN001":    SeverityWarn,
 		"GEN002":    SeverityWarn,
@@ -223,7 +253,16 @@ func TestRuleRegistryMetadata(t *testing.T) {
 		"PY002":     SeverityWarn,
 		"NODE001":   SeverityWarn,
 		"NODE002":   SeverityWarn,
+		"NODE003":   SeverityWarn,
+		"NODE004":   SeverityWarn,
 		"CCPP001":   SeverityWarn,
+		"GO004":     SeverityWarn,
+		"GEN009":    SeverityWarn,
+		"GEN010":    SeverityInfo,
+		"DOTNET002": SeverityWarn,
+		"RUST002":   SeverityWarn,
+		"RUST003":   SeverityWarn,
+		"RUST004":   SeverityWarn,
 	}
 
 	gotIDs := make([]string, 0, len(registeredRules))

@@ -31,8 +31,8 @@ func TestRunCleanJSON(t *testing.T) {
 func TestRunSARIFAggregatesDirectory(t *testing.T) {
 	dir := t.TempDir()
 	for name, content := range map[string]string{
-		"Dockerfile.api": "FROM ubuntu:latest\nUSER app\n",
-		"Dockerfile.web": "FROM alpine:3.20\nUSER app\n",
+		"Dockerfile.api": "# dockopt:disable GEN010\nFROM ubuntu:latest\nUSER app\n",
+		"Dockerfile.web": "# dockopt:disable GEN010\nFROM alpine:3.20\nUSER app\n",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
@@ -51,10 +51,73 @@ func TestRunSARIFAggregatesDirectory(t *testing.T) {
 	}
 }
 
+func TestRunSARIFContinuesAfterParseError(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "Dockerfile.good")
+	bad := filepath.Join(dir, "Dockerfile.bad")
+	if err := os.WriteFile(good, []byte("FROM ubuntu:latest\nUSER app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bad, []byte("FROM\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := runWithBuffers("--sarif", good, bad)
+	if code != 2 {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "parse_error") {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	if !strings.Contains(stdout, `"ruleId":"GEN001"`) {
+		t.Fatalf("SARIF should include findings from the parseable file: %q", stdout)
+	}
+}
+
 func TestRunRejectsJSONAndSARIFTogether(t *testing.T) {
 	_, stderr, code := runWithBuffers("--json", "--sarif", fixturePath("clean"))
 	if code != 2 || !strings.Contains(stderr, "mutually exclusive") {
 		t.Fatalf("code=%d, stderr=%q", code, stderr)
+	}
+}
+
+func TestRunConfigFileSetsFailOn(t *testing.T) {
+	dir := t.TempDir()
+	dockerfilePath := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine:latest\nUSER app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".dockopt.yml"), []byte("fail-on: warn\nignore: GEN010\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if _, _, code := runWithBuffers(dockerfilePath); code != 1 {
+		t.Fatalf("config fail-on warn should fail the process, code=%d", code)
+	}
+	if _, _, code := runWithBuffers("--no-config", dockerfilePath); code != 0 {
+		t.Fatalf("--no-config should keep default fail-on error, code=%d", code)
+	}
+}
+
+func TestRunFixRewritesMechanicalRules(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Dockerfile")
+	src := "FROM debian:bookworm\nRUN apt-get install -y curl\nUSER app\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := runWithBuffers("--fix", "--ignore", "GEN009,GEN010", "--json", path)
+	if code != 0 || stderr != "" {
+		t.Fatalf("code=%d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "--no-install-recommends") || !strings.Contains(string(got), "/var/lib/apt/lists") {
+		t.Fatalf("file not fixed: %q", got)
+	}
+	if strings.Contains(stdout, "GEN002") || strings.Contains(stdout, "GEN003") {
+		t.Fatalf("fixed findings still reported: %q", stdout)
 	}
 }
 
@@ -340,6 +403,7 @@ func TestRequestsJSONStopsAtPathOrFlagTerminator(t *testing.T) {
 		{name: "after terminator", args: []string{"--", "--json"}, want: false},
 		{name: "after invalid flag", args: []string{"--bogus", "--json", "Dockerfile"}, want: true},
 		{name: "after ignore value", args: []string{"--ignore", "GEN001", "--json"}, want: true},
+		{name: "after config value", args: []string{"--config", ".dockopt.yml", "--json"}, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := requestsJSON(test.args); got != test.want {
